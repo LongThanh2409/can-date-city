@@ -1,0 +1,6 @@
+{
+  "indexes": [
+    { "collectionGroup": "dateRecords", "queryScope": "COLLECTION", "fields": [{ "fieldPath": "chatDate", "order": "DESCENDING" }, { "fieldPath": "productCode", "order": "ASCENDING" }] }
+  ],
+  "fieldOverrides": []
+}

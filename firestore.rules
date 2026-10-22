@@ -1,0 +1,49 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function allowed() { return signedIn() && exists(/databases/$(database)/documents/allowedUsers/$(request.auth.uid)); }
+    function userRole() { return get(/databases/$(database)/documents/allowedUsers/$(request.auth.uid)).data.role; }
+    function isSale() { return allowed() && userRole() == 'sale'; }
+    function isAdmin() { return allowed() && userRole() == 'admin'; }
+    function validProduct() {
+      return request.resource.data.productCode is string
+        && request.resource.data.productCode.size() > 0
+        && request.resource.data.productName is string
+        && request.resource.data.vietnameseName is string
+        && request.resource.data.aliases is list
+        && request.resource.data.productGroup in ['ambient', 'chilled', 'sterilized-sausage', 'frozen']
+        && request.resource.data.packaging is map
+        && request.resource.data.packaging.type in ['carton-only', 'carton-pack', 'carton-bag-pack', 'basket-bag', 'basket-bag-pack', 'box-bag-pack', 'box-pack']
+        && request.resource.data.packaging.note is string
+        && request.resource.data.active is bool;
+    }
+    function validRecord() {
+      return request.resource.data.chatDate is string
+        && request.resource.data.productId is string
+        && request.resource.data.productCode is string
+        && request.resource.data.isNewDate is bool
+        && request.resource.data.lots is list
+        && request.resource.data.lots.size() > 0
+        && request.resource.data.createdBy is string
+        && request.resource.data.updatedBy is string
+        && (!('saleNote' in request.resource.data) || request.resource.data.saleNote is string);
+    }
+    match /allowedUsers/{uid} {
+      allow read: if signedIn() && request.auth.uid == uid;
+      allow write: if false;
+    }
+    match /products/{id} {
+      allow read: if allowed();
+      allow create, update: if isAdmin() && validProduct();
+      allow delete: if isAdmin();
+    }
+    match /dateRecords/{id} {
+      allow read: if allowed();
+      allow create: if isAdmin() && validRecord();
+      allow update: if allowed() && validRecord()
+        && (isAdmin() || (isSale() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['saleNote', 'updatedAt', 'updatedBy'])));
+      allow delete: if isAdmin();
+    }
+  }
+}
