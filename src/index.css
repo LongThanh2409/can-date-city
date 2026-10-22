@@ -32,9 +32,9 @@
   .data-table th, .comparison-table th { @apply sticky top-0 z-10 whitespace-nowrap border-b bg-slate-50 px-3 py-2.5 text-[11px] font-bold uppercase tracking-wide text-slate-500; }
   .data-table td, .comparison-table td { @apply border-b px-3 py-3 align-middle; }
   .data-table tr:hover td, .comparison-table tr:hover td { @apply bg-slate-50; }
-  .comparison-table { @apply min-w-[1180px]; }
+  .comparison-table { @apply min-w-[1320px]; }
   .comparison-table .sticky-col-1 { @apply sticky left-0 z-20 bg-white; }
-  .comparison-table .sticky-col-2 { @apply sticky left-36 z-20 bg-white shadow-[4px_0_8px_-7px_rgba(15,23,42,.7)]; }
+  .comparison-table .sticky-col-2 { @apply sticky left-28 z-20 bg-white shadow-[4px_0_8px_-7px_rgba(15,23,42,.7)]; }
   .comparison-table thead .sticky-col-1, .comparison-table thead .sticky-col-2 { @apply z-30 bg-slate-50; }
   .comparison-table .comparison-row-base td { @apply bg-white; }
   .comparison-table .comparison-row-alt td { @apply bg-slate-50; }

@@ -1,4 +1,4 @@
-import { collection, deleteDoc, doc, getDoc, getDocs, onSnapshot, orderBy, query, runTransaction, serverTimestamp, setDoc, where, writeBatch, type Unsubscribe } from 'firebase/firestore'
+import { collection, deleteDoc, doc, getDoc, getDocs, onSnapshot, orderBy, query, runTransaction, serverTimestamp, setDoc, updateDoc, where, writeBatch, type Unsubscribe } from 'firebase/firestore'
 import { db } from '../lib/firebase'
 import { datesToDelete } from '../domain/retention'
 import type { AllowedUser, DateRecord, Product } from '../types'
@@ -49,6 +49,14 @@ export async function saveDateRecord({ record, expectedUpdatedAt, force = false 
 
 export async function deleteDateRecord(id: string): Promise<void> {
   await deleteDoc(doc(db, 'dateRecords', id))
+}
+
+export async function updateSaleNote(recordId: string, saleNote: string, userId: string): Promise<void> {
+  await updateDoc(doc(db, 'dateRecords', recordId), {
+    saleNote,
+    updatedBy: userId,
+    updatedAt: serverTimestamp(),
+  })
 }
 
 export async function deleteChatDate(chatDate: string): Promise<number> {

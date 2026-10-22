@@ -16,6 +16,14 @@ describe('compareLots',()=>{
   it('không tính chênh lệch số lượng khi đổi đơn vị',()=>{
     expect(compareLots([lot({unit:'kg'})],[lot()])[0]).toMatchObject({quantityDelta:null,status:'unit-changed'})
   })
+  it('luôn xếp lô từ ngày sản xuất xa đến gần, không phụ thuộc thứ tự nhập',()=>{
+    const lots=compareLots([
+      lot({lotId:'3',productionDate:'2026-10-20',lotLabel:'C'}),
+      lot({lotId:'1',productionDate:'2026-08-01',lotLabel:'A'}),
+      lot({lotId:'2',productionDate:'2026-09-15',lotLabel:'B'}),
+    ])
+    expect(lots.map((item)=>item.current?.productionDate)).toEqual(['2026-08-01','2026-09-15','2026-10-20'])
+  })
 })
 describe('compareRecords',()=>{
   it('không nhầm nhãn MỚI thủ công với lô mới tự phát hiện',()=>{
