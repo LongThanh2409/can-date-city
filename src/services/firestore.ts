@@ -1,7 +1,7 @@
 import { collection, deleteDoc, doc, getDoc, getDocs, onSnapshot, orderBy, query, runTransaction, serverTimestamp, setDoc, where, writeBatch, type Unsubscribe } from 'firebase/firestore'
 import { db } from '../lib/firebase'
 import { datesToDelete } from '../domain/retention'
-import type { DateRecord, Product } from '../types'
+import type { AllowedUser, DateRecord, Product } from '../types'
 import { normalizeProduct } from '../domain/product'
 
 const clean = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T
@@ -85,4 +85,36 @@ export async function bulkUpdateProducts(ids: string[], updates: Pick<Product, '
     })
     await batch.commit()
   }
+}
+
+// ─── Allowed Users (Admin only) ──────────────────────────────────────────────
+
+export function subscribeAllowedUsers(onData: (items: AllowedUser[]) => void, onError: (error: Error) => void): Unsubscribe {
+  return onSnapshot(
+    collection(db, 'allowedUsers'),
+    (snapshot) => onData(snapshot.docs.map((item) => {
+      const data = item.data()
+      const email = typeof data.email === 'string' ? data.email.trim() : ''
+      const displayName = typeof data.displayName === 'string' ? data.displayName.trim() : ''
+      const storedRole = typeof data.role === 'string' ? data.role.trim().toLowerCase() : ''
+      const role: AllowedUser['role'] = storedRole === 'admin' || storedRole === 'sale' ? storedRole : 'user'
+      return {
+        uid: item.id,
+        active: data.active !== false,
+        displayName,
+        email,
+        role,
+      }
+    }).sort((a, b) => (a.email || a.displayName || a.uid).localeCompare(b.email || b.displayName || b.uid, 'vi'))),
+    onError,
+  )
+}
+
+export async function saveAllowedUser(user: AllowedUser): Promise<void> {
+  const { uid, ...data } = user
+  await setDoc(doc(db, 'allowedUsers', uid), clean(data), { merge: true })
+}
+
+export async function deleteAllowedUser(uid: string): Promise<void> {
+  await deleteDoc(doc(db, 'allowedUsers', uid))
 }

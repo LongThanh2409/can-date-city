@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { onAuthStateChanged, signOut, type User } from 'firebase/auth'
-import { doc, getDoc } from 'firebase/firestore'
+import { doc, onSnapshot, type Unsubscribe } from 'firebase/firestore'
 import { auth, db } from '../lib/firebase'
 import type { UserRole } from '../types'
 
@@ -9,17 +9,28 @@ export function useAuth() {
   const [allowed, setAllowed] = useState(false)
   const [role, setRole] = useState<UserRole>('user')
   const [loading, setLoading] = useState(true)
-  useEffect(() => onAuthStateChanged(auth, async (next) => {
+  useEffect(() => {
+    let stopAccess: Unsubscribe | undefined
+    const stopAuth = onAuthStateChanged(auth, (next) => {
+      stopAccess?.()
+      stopAccess = undefined
     setUser(next)
     if (!next) { setAllowed(false); setRole('user'); setLoading(false); return }
-    try {
-      const access = await getDoc(doc(db, 'allowedUsers', next.uid))
-      setAllowed(access.exists())
-      const storedRole = String(access.data()?.role ?? '').trim().toLowerCase()
-      setRole(storedRole === 'admin' || storedRole === 'sale' ? storedRole : 'user')
-    }
-    catch { setAllowed(false); setRole('user') }
-    finally { setLoading(false) }
-  }), [])
+      setLoading(true)
+      stopAccess = onSnapshot(doc(db, 'allowedUsers', next.uid), (access) => {
+        const data = access.data()
+        const isActive = data?.active !== false
+        setAllowed(access.exists() && isActive)
+        const storedRole = String(data?.role ?? '').trim().toLowerCase()
+        setRole(storedRole === 'admin' || storedRole === 'sale' ? storedRole : 'user')
+        setLoading(false)
+      }, () => {
+        setAllowed(false)
+        setRole('user')
+        setLoading(false)
+      })
+    })
+    return () => { stopAccess?.(); stopAuth() }
+  }, [])
   return { user, allowed, role, loading, logout: () => signOut(auth) }
 }

@@ -2,10 +2,21 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
     function signedIn() { return request.auth != null; }
-    function allowed() { return signedIn() && exists(/databases/$(database)/documents/allowedUsers/$(request.auth.uid)); }
+    function allowed() {
+      return signedIn()
+        && exists(/databases/$(database)/documents/allowedUsers/$(request.auth.uid))
+        && (!('active' in get(/databases/$(database)/documents/allowedUsers/$(request.auth.uid)).data)
+          || get(/databases/$(database)/documents/allowedUsers/$(request.auth.uid)).data.active == true);
+    }
     function userRole() { return get(/databases/$(database)/documents/allowedUsers/$(request.auth.uid)).data.role; }
     function isSale() { return allowed() && userRole() == 'sale'; }
     function isAdmin() { return allowed() && userRole() == 'admin'; }
+    function validAllowedUser() {
+      return request.resource.data.active is bool
+        && request.resource.data.displayName is string
+        && request.resource.data.email is string
+        && request.resource.data.role in ['admin', 'sale', 'user'];
+    }
     function validProduct() {
       return request.resource.data.productCode is string
         && request.resource.data.productCode.size() > 0
@@ -30,8 +41,9 @@ service cloud.firestore {
         && (!('saleNote' in request.resource.data) || request.resource.data.saleNote is string);
     }
     match /allowedUsers/{uid} {
-      allow read: if signedIn() && request.auth.uid == uid;
-      allow write: if false;
+      allow read: if signedIn() && (request.auth.uid == uid || isAdmin());
+      allow create, update: if isAdmin() && validAllowedUser();
+      allow delete: if isAdmin();
     }
     match /products/{id} {
       allow read: if allowed();

@@ -2,6 +2,14 @@ import type { Timestamp } from 'firebase/firestore'
 
 export type UserRole = 'admin' | 'sale' | 'user'
 
+export interface AllowedUser {
+  uid: string
+  active: boolean
+  displayName: string
+  email: string
+  role: UserRole
+}
+
 export interface Product {
   id: string
   productCode: string
