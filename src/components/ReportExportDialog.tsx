@@ -14,7 +14,7 @@ type ReportExportDialogProps = {
 }
 
 export function ReportExportDialog({ rows, products, date, onClose, notify }: ReportExportDialogProps) {
-  const [orientation, setOrientation] = useState<ReportOrientation>('landscape')
+  const [orientation, setOrientation] = useState<ReportOrientation>('portrait')
   const [printMode, setPrintMode] = useState<ReportPrintMode>('monochrome')
   const [layoutMode, setLayoutMode] = useState<ReportLayoutMode>('compact')
   const [previewUrl, setPreviewUrl] = useState<string>()
