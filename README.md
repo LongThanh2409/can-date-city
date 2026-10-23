@@ -17,8 +17,9 @@ Firebase Authentication
 
 - `src/domain`: hàm nghiệp vụ thuần, có unit test (so sánh, kiểm tra lô, retention).
 - `src/services`: truy cập Firestore, transaction chống ghi đè và batch delete.
-- `src/components`: đăng nhập, bảng đối chiếu, danh mục, chọn sản phẩm và drawer nhập nhanh.
+- `src/components`: đăng nhập, bảng đối chiếu, workflow Sale, cảnh báo, lịch sử, danh mục, chọn sản phẩm và drawer nhập nhanh.
 - `src/lib`: Firebase, múi giờ Việt Nam và import/export.
+- `functions`: quản trị Firebase Auth an toàn, audit log và retention chạy theo lịch.
 
 Các giả định nghiệp vụ:
 
@@ -58,15 +59,23 @@ npm run build
 3. Trong **Authentication → Users**, tạo từng tài khoản cho người được phép dùng. Không có màn hình tự đăng ký trong app.
 4. Trong **Project settings → Your apps**, tạo Web app và chép cấu hình public vào `.env.local` theo `.env.example`. Firebase Web config không phải server secret; tuyệt đối không thêm service-account/Admin SDK vào frontend.
 5. Tạo Cloud Firestore ở production mode, chọn khu vực gần người dùng (ví dụ Singapore nếu phù hợp chính sách tổ chức).
-6. Với từng Firebase Authentication user, lấy UID và tạo document `allowedUsers/{uid}`. Nội dung nên là `{ "email": "user@example.com", "active": true, "role": "user" }`. Dùng `"role": "admin"` cho tài khoản toàn quyền, `"role": "sale"` cho tài khoản chỉ được cập nhật Ghi chú Sale, và `"role": "user"` cho tài khoản chỉ xem. Nếu không có trường `role`, ứng dụng mặc định là `user`. Rules dùng sự tồn tại của document làm allowlist.
+6. Với từng Firebase Authentication user, lấy UID và tạo document `allowedUsers/{uid}`. Nội dung nên là `{ "email": "user@example.com", "active": true, "role": "user" }`. Dùng `"role": "admin"` cho tài khoản toàn quyền, `"role": "sale"` cho tài khoản cập nhật quy trình và ghi chú Sale, và `"role": "user"` cho tài khoản chỉ xem/xuất báo cáo. Nếu không có trường `role`, ứng dụng mặc định là `user`. Rules dùng sự tồn tại của document làm allowlist.
 7. Cài Firebase CLI và đăng nhập:
 
 ```powershell
 npm install -g firebase-tools
 firebase login
 firebase use --add
-firebase deploy --only firestore:rules,firestore:indexes
+cd functions
+npm install
+npm run build
+cd ..
+firebase deploy --only firestore:rules,firestore:indexes,functions
 ```
+
+Sau khi Functions đã deploy thành công, đặt `VITE_USE_ADMIN_FUNCTIONS=true` trên môi trường frontend rồi deploy lại ứng dụng. Khi bật, tạo/sửa/xóa tài khoản trong Admin Panel sẽ đồng bộ cả Firebase Authentication và `allowedUsers`. Trước khi bật, ứng dụng vẫn dùng luồng tương thích cũ.
+
+Functions yêu cầu Node.js 22. Scheduled function chạy lúc 01:00 theo múi giờ Việt Nam để giữ 5 ngày dữ liệu gần nhất. Firestore triggers ghi 100% thay đổi của `dateRecords`, `products` và `allowedUsers` vào `auditLogs`; chỉ admin được đọc lịch sử này.
 
 ### Kiểm tra Security Rules
 
@@ -116,6 +125,12 @@ firebase emulators:start --only auth,firestore
   "productName": "Original product name",
   "vietnameseName": "Tên sản phẩm",
   "isNewDate": false,
+  "saleWorkflow": {
+    "status": "pending",
+    "priority": "normal",
+    "assigneeUid": "firebase uid",
+    "dueDate": "2026-10-25"
+  },
   "lots": [{
     "lotId": "uuid",
     "productionDate": "2026-09-10",

@@ -38,7 +38,12 @@ service cloud.firestore {
         && request.resource.data.lots.size() > 0
         && request.resource.data.createdBy is string
         && request.resource.data.updatedBy is string
-        && (!('saleNote' in request.resource.data) || request.resource.data.saleNote is string);
+        && (!('saleNote' in request.resource.data) || request.resource.data.saleNote is string)
+        && (!('saleWorkflow' in request.resource.data) || (
+          request.resource.data.saleWorkflow is map
+          && request.resource.data.saleWorkflow.status in ['pending', 'in_progress', 'done']
+          && request.resource.data.saleWorkflow.priority in ['normal', 'high', 'urgent']
+        ));
     }
     match /allowedUsers/{uid} {
       allow read: if signedIn() && (request.auth.uid == uid || isAdmin());
@@ -54,8 +59,12 @@ service cloud.firestore {
       allow read: if allowed();
       allow create: if isAdmin() && validRecord();
       allow update: if allowed() && validRecord()
-        && (isAdmin() || (isSale() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['saleNote', 'updatedAt', 'updatedBy'])));
+        && (isAdmin() || (isSale() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['saleNote', 'saleWorkflow', 'updatedAt', 'updatedBy'])));
       allow delete: if isAdmin();
+    }
+    match /auditLogs/{id} {
+      allow read: if isAdmin();
+      allow write: if false;
     }
   }
 }

@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Download, FileSpreadsheet, PackageOpen, Pencil, Plus, Search, Trash2, X } from 'lucide-react'
 import { PACKAGING_TYPE_LABELS, PRODUCT_GROUP_LABELS, defaultPackaging, normalizeProduct, packagingSummary, validatePackaging } from '../domain/product'
 import { downloadProductTemplate, exportProducts, parseProductFile } from '../lib/io'
@@ -68,6 +68,7 @@ export function ProductManager({ products, onClose, notify }: { products: Produc
   }), [products, query, groupFilter, statusFilter, packagingFilter])
   const filtering = Boolean(query.trim()) || groupFilter !== 'all' || statusFilter !== 'all' || packagingFilter !== 'all'
   const allShownSelected = shown.length > 0 && shown.every((product)=>selectedIds.has(product.id))
+  useEffect(()=>{const close=(event:KeyboardEvent)=>{if(event.key!=='Escape')return;if(preview.length)setPreview([]);else onClose()};window.addEventListener('keydown',close);return()=>window.removeEventListener('keydown',close)},[onClose,preview.length])
 
   function clearFilters() { setQuery(''); setGroupFilter('all'); setStatusFilter('all'); setPackagingFilter('all') }
   function toggleProduct(id: string) { setSelectedIds((current)=>{ const next = new Set(current); if (next.has(id)) next.delete(id); else next.add(id); return next }) }

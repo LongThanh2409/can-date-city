@@ -6,3 +6,5 @@ dist
 firebase-debug.log
 *.local
 *.tsbuildinfo
+functions/lib
+functions/node_modules

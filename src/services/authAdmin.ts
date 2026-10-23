@@ -1,9 +1,12 @@
-// Tạo tài khoản Firebase Auth qua REST API (không cần Admin SDK)
-// https://firebase.google.com/docs/reference/rest/auth#section-create-email-password
+import { getFunctions, httpsCallable } from 'firebase/functions'
+import type { AllowedUser } from '../types'
+import { deleteAllowedUser, saveAllowedUser } from './firestore'
 
 const API_KEY = import.meta.env.VITE_FIREBASE_API_KEY as string
+const useAdminFunctions = import.meta.env.VITE_USE_ADMIN_FUNCTIONS === 'true'
+const functions = getFunctions(undefined,'asia-southeast1')
 
-export async function createFirebaseUser(email: string, password: string): Promise<string> {
+async function createFirebaseUser(email: string, password: string): Promise<string> {
   const response = await fetch(
     `https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${API_KEY}`,
     {
@@ -22,4 +25,24 @@ export async function createFirebaseUser(email: string, password: string): Promi
   }
   const data = await response.json() as { localId: string }
   return data.localId
+}
+
+export async function createManagedUser(user: Omit<AllowedUser,'uid'>, password: string): Promise<string> {
+  if (useAdminFunctions) {
+    const result = await httpsCallable<typeof user & {password:string},{uid:string}>(functions,'createManagedUser')({...user,password})
+    return result.data.uid
+  }
+  const uid = await createFirebaseUser(user.email,password)
+  try { await saveAllowedUser({uid,...user}); return uid }
+  catch { throw new Error('Đã tạo tài khoản đăng nhập nhưng chưa cấp được quyền. Hãy kiểm tra Firebase Console.') }
+}
+
+export async function updateManagedUser(user: AllowedUser): Promise<void> {
+  if (useAdminFunctions) { await httpsCallable<AllowedUser,{uid:string}>(functions,'updateManagedUser')(user); return }
+  await saveAllowedUser(user)
+}
+
+export async function removeManagedUser(uid: string): Promise<void> {
+  if (useAdminFunctions) { await httpsCallable<{uid:string},{uid:string}>(functions,'deleteManagedUser')({uid}); return }
+  await deleteAllowedUser(uid)
 }

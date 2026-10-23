@@ -3,8 +3,8 @@ import {
   Check, ChevronDown, Edit2, Loader2, Lock, Mail, Plus, Shield, Trash2,
   TriangleAlert, User, UserCheck, UserX, X
 } from 'lucide-react'
-import { subscribeAllowedUsers, saveAllowedUser, deleteAllowedUser } from '../services/firestore'
-import { createFirebaseUser } from '../services/authAdmin'
+import { subscribeAllowedUsers } from '../services/firestore'
+import { createManagedUser, removeManagedUser, updateManagedUser } from '../services/authAdmin'
 import type { AllowedUser, UserRole } from '../types'
 
 interface Props {
@@ -19,6 +19,7 @@ const ROLE_COLORS: Record<UserRole, string> = {
   sale: 'bg-amber-100 text-amber-700 border-amber-200',
   user: 'bg-slate-100 text-slate-600 border-slate-200',
 }
+const usesAdminFunctions = import.meta.env.VITE_USE_ADMIN_FUNCTIONS === 'true'
 
 const emptyForm = (): FormState => ({ active: true, displayName: '', email: '', role: 'user', password: '' })
 
@@ -47,6 +48,7 @@ export function AdminPanel({ notify, onClose, currentUid }: Props) {
     )
     return unsub
   }, [notify])
+  useEffect(()=>{const close=(event:KeyboardEvent)=>{if(event.key!=='Escape')return;if(formOpen)closeForm();else onClose()};window.addEventListener('keydown',close);return()=>window.removeEventListener('keydown',close)},[formOpen,onClose])
 
   function openCreate() {
     setEditingUid(null)
@@ -70,17 +72,19 @@ export function AdminPanel({ notify, onClose, currentUid }: Props) {
     if (editingUid === currentUid && (!form.active || form.role !== 'admin')) { notify('Không thể vô hiệu hóa hoặc hạ quyền tài khoản admin đang đăng nhập.', true); return }
     setSaving(true)
     try {
-      let uid = editingUid
-      if (!uid) {
-        uid = await createFirebaseUser(form.email.trim(), form.password)
-      }
-      await saveAllowedUser({
-        uid,
+      if (editingUid) await updateManagedUser({
+        uid:editingUid,
         active: form.active,
         displayName: form.displayName.trim(),
         email: form.email.trim(),
         role: form.role,
       })
+      else await createManagedUser({
+        active: form.active,
+        displayName: form.displayName.trim(),
+        email: form.email.trim(),
+        role: form.role,
+      },form.password)
       notify(editingUid ? 'Đã cập nhật tài khoản.' : 'Đã tạo tài khoản mới.')
       closeForm()
     } catch (err) {
@@ -96,7 +100,7 @@ export function AdminPanel({ notify, onClose, currentUid }: Props) {
     setDeletingUid(uid)
     setConfirmDeleteUid(null)
     try {
-      await deleteAllowedUser(uid)
+      await removeManagedUser(uid)
       notify('Đã xóa tài khoản khỏi danh sách cho phép.')
     } catch {
       notify('Xóa tài khoản thất bại.', true)
@@ -122,6 +126,7 @@ export function AdminPanel({ notify, onClose, currentUid }: Props) {
           </div>
           <button
             onClick={onClose}
+            aria-label="Đóng"
             className="grid h-8 w-8 place-items-center rounded-lg text-white/70 transition hover:bg-white/10 hover:text-white"
           >
             <X size={18} />
@@ -239,7 +244,7 @@ export function AdminPanel({ notify, onClose, currentUid }: Props) {
         <div className="rounded-b-2xl border-t bg-amber-50 px-6 py-3">
           <p className="flex items-start gap-2 text-xs text-amber-700">
             <TriangleAlert size={14} className="mt-0.5 shrink-0" />
-            Xóa tài khoản khỏi danh sách sẽ thu hồi quyền truy cập nhưng <strong className="mx-0.5">không xóa</strong> tài khoản Firebase Auth. Liên hệ Firebase Console để xóa hoàn toàn.
+            {usesAdminFunctions ? 'Xóa tài khoản sẽ thu hồi quyền và xóa luôn tài khoản Firebase Authentication.' : <>Xóa tài khoản khỏi danh sách sẽ thu hồi quyền truy cập nhưng <strong className="mx-0.5">không xóa</strong> tài khoản Firebase Auth. Deploy Functions và bật VITE_USE_ADMIN_FUNCTIONS để đồng bộ hoàn toàn.</>}
           </p>
         </div>
       </div>
@@ -255,6 +260,7 @@ export function AdminPanel({ notify, onClose, currentUid }: Props) {
               </h3>
               <button
                 onClick={closeForm}
+                aria-label="Đóng biểu mẫu"
                 className="grid h-7 w-7 place-items-center rounded-lg text-white/60 transition hover:bg-white/10 hover:text-white"
               >
                 <X size={16} />
@@ -329,7 +335,7 @@ export function AdminPanel({ notify, onClose, currentUid }: Props) {
                     value={form.role}
                     onChange={(e) => setForm({ ...form, role: e.target.value as UserRole })}
                   >
-                    <option value="user">Người dùng — xem & nhập liệu thông thường</option>
+                    <option value="user">Người xem — chỉ xem và xuất báo cáo</option>
                     <option value="sale">Nhân viên bán hàng — chỉ sửa ghi chú bán</option>
                     <option value="admin">Quản trị viên — toàn quyền</option>
                   </select>

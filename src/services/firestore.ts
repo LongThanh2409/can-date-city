@@ -1,10 +1,19 @@
-import { collection, deleteDoc, doc, getDoc, getDocs, onSnapshot, orderBy, query, runTransaction, serverTimestamp, setDoc, updateDoc, where, writeBatch, type Unsubscribe } from 'firebase/firestore'
+import { collection, deleteDoc, doc, getDoc, getDocs, limit, onSnapshot, orderBy, query, runTransaction, serverTimestamp, setDoc, updateDoc, where, writeBatch, type Unsubscribe } from 'firebase/firestore'
 import { db } from '../lib/firebase'
 import { datesToDelete } from '../domain/retention'
-import type { AllowedUser, DateRecord, Product } from '../types'
+import type { AllowedUser, AuditLog, DateRecord, Product, SaleWorkflow } from '../types'
 import { normalizeProduct } from '../domain/product'
 
 const clean = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T
+const BATCH_SIZE = 450
+
+async function commitChunks<T>(items: T[], add: (batch: ReturnType<typeof writeBatch>, item: T) => void): Promise<void> {
+  for (let index = 0; index < items.length; index += BATCH_SIZE) {
+    const batch = writeBatch(db)
+    items.slice(index, index + BATCH_SIZE).forEach((item) => add(batch, item))
+    await batch.commit()
+  }
+}
 
 export function subscribeProducts(onData: (items: Product[]) => void, onError: (error: Error) => void): Unsubscribe {
   return onSnapshot(query(collection(db, 'products'), orderBy('productCode')), (snapshot) => onData(snapshot.docs.map((item) => normalizeProduct({ id: item.id, ...item.data() } as Product))), onError)
@@ -59,40 +68,72 @@ export async function updateSaleNote(recordId: string, saleNote: string, userId:
   })
 }
 
+export async function updateSaleWorkflow(recordId: string, saleWorkflow: SaleWorkflow, userId: string): Promise<void> {
+  await updateDoc(doc(db, 'dateRecords', recordId), {
+    saleWorkflow: clean(saleWorkflow),
+    updatedBy: userId,
+    updatedAt: serverTimestamp(),
+  })
+}
+
 export async function deleteChatDate(chatDate: string): Promise<number> {
   const snapshot = await getDocs(query(collection(db, 'dateRecords'), where('chatDate', '==', chatDate)))
-  const batch = writeBatch(db)
-  snapshot.docs.forEach((item) => batch.delete(item.ref))
-  await batch.commit()
+  await commitChunks(snapshot.docs, (batch, item) => batch.delete(item.ref))
   return snapshot.size
 }
 
 export async function enforceRetention(records: DateRecord[]): Promise<string[]> {
   const expired = datesToDelete(records.map((record) => record.chatDate))
   if (!expired.length) return []
-  const batch = writeBatch(db)
-  records.filter((record) => expired.includes(record.chatDate)).forEach((record) => batch.delete(doc(db, 'dateRecords', record.id)))
-  await batch.commit()
+  await commitChunks(records.filter((record) => expired.includes(record.chatDate)), (batch, record) => batch.delete(doc(db, 'dateRecords', record.id)))
   return expired
 }
 
 export async function importProducts(products: Omit<Product, 'createdAt' | 'updatedAt'>[]): Promise<void> {
-  const batch = writeBatch(db)
-  products.forEach((product) => {
+  await commitChunks(products, (batch, product) => {
     const ref = doc(db, 'products', product.id)
     batch.set(ref, { ...clean(product), updatedAt: serverTimestamp(), createdAt: serverTimestamp() }, { merge: true })
   })
-  await batch.commit()
 }
 
 export async function bulkUpdateProducts(ids: string[], updates: Pick<Product, 'productGroup' | 'packaging'>): Promise<void> {
-  for (let index = 0; index < ids.length; index += 450) {
-    const batch = writeBatch(db)
-    ids.slice(index, index + 450).forEach((id) => {
-      batch.set(doc(db, 'products', id), { ...clean(updates), updatedAt: serverTimestamp() }, { merge: true })
+  await commitChunks(ids, (batch, id) => batch.set(doc(db, 'products', id), { ...clean(updates), updatedAt: serverTimestamp() }, { merge: true }))
+}
+
+export interface CloneDateResult {
+  copied: number
+  skipped: number
+}
+
+export async function cloneChatDate(sourceDate: string, targetDate: string, userId: string, copySaleNotes = false): Promise<CloneDateResult> {
+  const [source, target] = await Promise.all([
+    getDocs(query(collection(db, 'dateRecords'), where('chatDate', '==', sourceDate))),
+    getDocs(query(collection(db, 'dateRecords'), where('chatDate', '==', targetDate))),
+  ])
+  const existingProducts = new Set(target.docs.map((item) => String(item.data().productId)))
+  const sourceRecords = source.docs.map((item) => ({ id: item.id, ...item.data() }) as DateRecord)
+  const recordsToCopy = sourceRecords.filter((record) => !existingProducts.has(record.productId))
+  await commitChunks(recordsToCopy, (batch, record) => {
+    const id = `${targetDate}_${record.productId}`
+    const { createdAt: _createdAt, updatedAt: _updatedAt, ...recordData } = record
+    void _createdAt
+    void _updatedAt
+    batch.set(doc(db, 'dateRecords', id), {
+      ...clean({
+      ...recordData,
+      id,
+      chatDate: targetDate,
+      isNewDate: false,
+      saleNote: copySaleNotes ? record.saleNote ?? '' : '',
+      saleWorkflow: { status: 'pending', priority: 'normal' },
+      createdBy: userId,
+      updatedBy: userId,
+      }),
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
     })
-    await batch.commit()
-  }
+  })
+  return { copied: recordsToCopy.length, skipped: sourceRecords.length - recordsToCopy.length }
 }
 
 // ─── Allowed Users (Admin only) ──────────────────────────────────────────────
@@ -116,6 +157,10 @@ export function subscribeAllowedUsers(onData: (items: AllowedUser[]) => void, on
     }).sort((a, b) => (a.email || a.displayName || a.uid).localeCompare(b.email || b.displayName || b.uid, 'vi'))),
     onError,
   )
+}
+
+export function subscribeAuditLogs(onData: (items: AuditLog[]) => void, onError: (error: Error) => void): Unsubscribe {
+  return onSnapshot(query(collection(db,'auditLogs'),orderBy('occurredAt','desc'),limit(100)),(snapshot)=>onData(snapshot.docs.map((item)=>({id:item.id,...item.data()}) as AuditLog)),onError)
 }
 
 export async function saveAllowedUser(user: AllowedUser): Promise<void> {

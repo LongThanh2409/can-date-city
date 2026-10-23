@@ -10,6 +10,19 @@ export interface AllowedUser {
   role: UserRole
 }
 
+export interface AuditLog {
+  id: string
+  collection: 'dateRecords' | 'products' | 'allowedUsers'
+  documentId: string
+  action: 'create' | 'update' | 'delete'
+  changedFields: string[]
+  actorUid: string
+  authType: string
+  chatDate?: string
+  productCode?: string
+  occurredAt?: Timestamp
+}
+
 export interface Product {
   id: string
   productCode: string
@@ -66,11 +79,22 @@ export interface DateRecord {
   vietnameseName: string
   isNewDate: boolean
   saleNote?: string
+  saleWorkflow?: SaleWorkflow
   lots: Lot[]
   createdAt?: Timestamp
   updatedAt?: Timestamp
   createdBy: string
   updatedBy: string
+}
+
+export type SaleStatus = 'pending' | 'in_progress' | 'done'
+export type SalePriority = 'normal' | 'high' | 'urgent'
+
+export interface SaleWorkflow {
+  status: SaleStatus
+  priority: SalePriority
+  assigneeUid?: string
+  dueDate?: string
 }
 
 export type ChangeStatus = 'increased' | 'decreased' | 'changed' | 'new-lot' | 'missing-lot' | 'unchanged' | 'unit-changed'
@@ -106,4 +130,5 @@ export interface Filters {
   percentMin: string
   percentMax: string
   presence: 'all' | 'one-side'
+  noteState: 'all' | 'noted' | 'not-noted'
 }
