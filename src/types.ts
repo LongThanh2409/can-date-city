@@ -78,6 +78,7 @@ export interface DateRecord {
   productName: string
   vietnameseName: string
   isNewDate: boolean
+  priorityOrder?: number
   saleNote?: string
   saleWorkflow?: SaleWorkflow
   lots: Lot[]

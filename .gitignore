@@ -8,3 +8,4 @@ firebase-debug.log
 *.tsbuildinfo
 functions/lib
 functions/node_modules
+tmp/

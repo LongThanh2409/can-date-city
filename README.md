@@ -60,20 +60,22 @@ npm run build
 4. Trong **Project settings → Your apps**, tạo Web app và chép cấu hình public vào `.env.local` theo `.env.example`. Firebase Web config không phải server secret; tuyệt đối không thêm service-account/Admin SDK vào frontend.
 5. Tạo Cloud Firestore ở production mode, chọn khu vực gần người dùng (ví dụ Singapore nếu phù hợp chính sách tổ chức).
 6. Với từng Firebase Authentication user, lấy UID và tạo document `allowedUsers/{uid}`. Nội dung nên là `{ "email": "user@example.com", "active": true, "role": "user" }`. Dùng `"role": "admin"` cho tài khoản toàn quyền, `"role": "sale"` cho tài khoản cập nhật quy trình và ghi chú Sale, và `"role": "user"` cho tài khoản chỉ xem/xuất báo cáo. Nếu không có trường `role`, ứng dụng mặc định là `user`. Rules dùng sự tồn tại của document làm allowlist.
-7. Cài Firebase CLI và đăng nhập:
+7. Trong Firebase Console, mở **Firebase AI Logic → Get started**, chọn **Gemini Developer API** để dùng free tier trên Spark và chọn model `gemini-3.8-flash`.
+8. Bật **App Check** cho Web app bằng reCAPTCHA Enterprise, chép site key public vào `VITE_FIREBASE_APPCHECK_SITE_KEY` trong `.env.local`, sau đó enforce App Check cho Firebase AI Logic.
+9. Cài Firebase CLI và đăng nhập để deploy Rules/Indexes:
 
 ```powershell
 npm install -g firebase-tools
 firebase login
 firebase use --add
-cd functions
-npm install
-npm run build
-cd ..
-firebase deploy --only firestore:rules,firestore:indexes,functions
+firebase deploy --only firestore:rules,firestore:indexes
 ```
 
-Sau khi Functions đã deploy thành công, đặt `VITE_USE_ADMIN_FUNCTIONS=true` trên môi trường frontend rồi deploy lại ứng dụng. Khi bật, tạo/sửa/xóa tài khoản trong Admin Panel sẽ đồng bộ cả Firebase Authentication và `allowedUsers`. Trước khi bật, ứng dụng vẫn dùng luồng tương thích cũ.
+Ứng dụng dùng Firebase AI Logic SDK và proxy chính thức của Firebase. Không nhập hoặc lưu Gemini API key trong trình duyệt/Firestore; Firebase quản lý xác thực tới Gemini và App Check bảo vệ quota khỏi client không hợp lệ. Trong môi trường local khi App Check đã enforce, đặt `VITE_FIREBASE_APPCHECK_DEBUG_TOKEN=true`, mở DevTools lấy token được in ra, safelist token đó trong Firebase Console rồi có thể thay `true` bằng chính token để dùng ổn định. Không khai báo biến debug này trên Production.
+
+Trong **Xem trước & xuất**, nút **AI đề xuất tô đậm** chỉ trả về danh sách trường của bảng hiện tại cần nhấn mạnh. Người dùng có thể bật/tắt từng đề xuất hoặc bỏ toàn bộ; dữ liệu gốc không bị sửa và không có báo cáo AI riêng. Preview, PDF và Word dùng chung lựa chọn đã duyệt.
+
+Project Spark không cần deploy Functions để dùng tính năng Gemini. Nếu sau này nâng lên Blaze và deploy Functions quản trị, đặt `VITE_USE_ADMIN_FUNCTIONS=true` trên môi trường frontend để tạo/sửa/xóa tài khoản đồng bộ cả Firebase Authentication và `allowedUsers`; nếu không ứng dụng vẫn dùng luồng tương thích hiện tại.
 
 Functions yêu cầu Node.js 22. Scheduled function chạy lúc 01:00 theo múi giờ Việt Nam để giữ 5 ngày dữ liệu gần nhất. Firestore triggers ghi 100% thay đổi của `dateRecords`, `products` và `allowedUsers` vào `auditLogs`; chỉ admin được đọc lịch sử này.
 

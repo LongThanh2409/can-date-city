@@ -120,7 +120,7 @@ export function AdminPanel({ notify, onClose, currentUid }: Props) {
               <Shield size={20} className="text-white" />
             </div>
             <div>
-              <h2 className="text-lg font-bold text-white">Quản lý tài khoản</h2>
+              <h2 className="text-lg font-bold text-white">Quản trị hệ thống</h2>
               <p className="text-[11px] text-teal-100/70">Chỉ quản trị viên mới có quyền truy cập</p>
             </div>
           </div>

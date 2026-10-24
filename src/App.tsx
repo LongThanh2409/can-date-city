@@ -2,7 +2,7 @@ import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import { Activity, ArrowDownAZ, Bell, ChevronDown, Cloud, Copy, Eye, FilterX, History, LogOut, Package, PackageOpen, Plus, RefreshCw, Search, Settings2, Sparkles, Trash2, TriangleAlert, Users } from 'lucide-react'
 import { compareRecords, comparisonStats } from './domain/compare'
 import { closestPreviousDate, formatDate, previousCalendarDay, todayVietnam } from './lib/date'
-import { subscribeProducts, subscribeRecords, deleteChatDate, enforceRetention } from './services/firestore'
+import { subscribeProducts, subscribeRecords, deleteChatDate, enforceRetention, updateRecordPriorities } from './services/firestore'
 import type { DateRecord, Filters, Product, ProductGroup } from './types'
 import { useAuth } from './hooks/useAuth'
 import { Login } from './components/Login'
@@ -28,7 +28,9 @@ function App() {
   const [showStats,setShowStats]=useState(false)
   const [drawerStartsWithNewLot,setDrawerStartsWithNewLot]=useState(false)
   const [pickerOpen,setPickerOpen]=useState(false)
-  const [sort,setSort]=useState<'created'|'code'|'name'|'status'>('created'), [descending,setDescending]=useState(false), [page,setPage]=useState(1)
+  const [sort,setSort]=useState<'priority'|'created'|'code'|'name'|'status'>('created'), [descending,setDescending]=useState(true), [page,setPage]=useState(1)
+  const [showPreviousOnly,setShowPreviousOnly]=useState(false)
+  const [reorderBusy,setReorderBusy]=useState(false)
   const [reportOpen,setReportOpen]=useState(false)
   const [adminOpen,setAdminOpen]=useState(false)
   const [cloneOpen,setCloneOpen]=useState(false)
@@ -48,35 +50,60 @@ function App() {
   useEffect(()=>{if(manualCompare)return; const yesterday=previousCalendarDay(chatDate); const chosen=availableDates.includes(yesterday)?yesterday:closestPreviousDate(chatDate,availableDates); setCompareDate(chosen??yesterday)},[chatDate,availableDates,manualCompare])
   const current=useMemo(()=>records.filter(r=>r.chatDate===chatDate),[records,chatDate]), previous=useMemo(()=>records.filter(r=>r.chatDate===compareDate),[records,compareDate])
   const compared=useMemo(()=>compareRecords(current,previous),[current,previous]), stats=useMemo(()=>comparisonStats(compared),[compared])
+  const previousOnlyCount=useMemo(()=>compared.filter((row)=>!row.current&&row.previous).length,[compared])
   const filtered=useMemo(()=>compared.filter(row=>{
-    if(!row.current)return false
+    if(!row.current&&(role!=='admin'||!showPreviousOnly))return false
+    const activeRecord=row.current??row.previous!
     const product=products.find((item)=>item.id===row.productId)
     const q=filters.query.toLowerCase(); if(q&&!`${row.productCode} ${row.productName} ${row.vietnameseName} ${product?PRODUCT_GROUP_LABELS[product.productGroup]:''} ${product?packagingSummary(product):''}`.toLowerCase().includes(q))return false
     if(filters.productGroup!=='all'&&product?.productGroup!==filters.productGroup)return false
-    const hasNote=Boolean(row.current.saleNote?.trim())
+    const hasNote=Boolean(row.current?.saleNote?.trim())
     if(filters.noteState==='noted'&&!hasNote)return false
     if(filters.noteState==='not-noted'&&hasNote)return false
-    if(filters.newState==='new'&&!row.current?.isNewDate)return false; if(filters.newState==='not-new'&&row.current?.isNewDate)return false
+    if(filters.newState==='new'&&!activeRecord.isNewDate)return false; if(filters.newState==='not-new'&&activeRecord.isNewDate)return false
     if(filters.presence==='one-side'&&row.current&&row.previous)return false
     if(filters.change!=='all'&&row.status!==filters.change&&!row.lots.some(l=>l.status===filters.change))return false
     return row.lots.some(l=>{const lot=l.current??l.previous!; return (!filters.productionFrom||lot.productionDate>=filters.productionFrom)&&(!filters.productionTo||lot.productionDate<=filters.productionTo)&&(!filters.percentMin||lot.datePercent>=Number(filters.percentMin))&&(!filters.percentMax||lot.datePercent<=Number(filters.percentMax))})
   }).sort((a,b)=>{
     const direction=descending?-1:1
+    if(sort==='priority'){
+      if(Boolean(a.current)!==Boolean(b.current))return a.current?-1:1
+      const left=a.current?.priorityOrder??a.previous?.priorityOrder??Number.MAX_SAFE_INTEGER
+      const right=b.current?.priorityOrder??b.previous?.priorityOrder??Number.MAX_SAFE_INTEGER
+      return (left-right||a.productCode.localeCompare(b.productCode,'vi',{numeric:true}))*direction
+    }
     if(sort==='created'){
-      const left=a.current?.createdAt?.toMillis?.()??0
-      const right=b.current?.createdAt?.toMillis?.()??0
+      const left=(a.current??a.previous)?.createdAt?.toMillis?.()??0
+      const right=(b.current??b.previous)?.createdAt?.toMillis?.()??0
       return (left-right||a.productCode.localeCompare(b.productCode,'vi',{numeric:true}))*direction
     }
     const left=sort==='name'?a.vietnameseName:sort==='status'?a.status:a.productCode
     const right=sort==='name'?b.vietnameseName:sort==='status'?b.status:b.productCode
     return left.localeCompare(right,'vi',{numeric:true})*direction
-  }),[compared,filters,sort,descending,products])
+  }),[compared,filters,sort,descending,products,role,showPreviousOnly])
   const alertRows=useMemo(()=>current.filter((record)=>recordNeedsAttention(record,todayVietnam())),[current])
   const pageSize=50, totalPages=Math.max(1,Math.ceil(filtered.length/pageSize)), actualPage=Math.min(page,totalPages), displayed=filtered.slice((actualPage-1)*pageSize,actualPage*pageSize)
   const previousDayDate=previousCalendarDay(chatDate)
   const previousDayRecords=useMemo(()=>records.filter(r=>r.chatDate===previousDayDate),[records,previousDayDate])
   const selectedProduct=drawerProduct, selectedRecord=selectedProduct?current.find(r=>r.productId===selectedProduct.id):undefined, selectedPreviousDay=selectedProduct?previousDayRecords.find(r=>r.productId===selectedProduct.id):undefined
+  async function reorderRecords(sourceId: string, targetId: string) {
+    if(role!=='admin'||!user||reorderBusy||sourceId===targetId)return
+    const ordered=[...current].sort((a,b)=>(a.priorityOrder??Number.MAX_SAFE_INTEGER)-(b.priorityOrder??Number.MAX_SAFE_INTEGER)||a.productCode.localeCompare(b.productCode,'vi',{numeric:true}))
+    const sourceIndex=ordered.findIndex((record)=>record.id===sourceId), targetIndex=ordered.findIndex((record)=>record.id===targetId)
+    if(sourceIndex<0||targetIndex<0)return
+    const [moved]=ordered.splice(sourceIndex,1)
+    ordered.splice(targetIndex,0,moved)
+    const updates=ordered.map((record,priorityOrder)=>({id:record.id,priorityOrder}))
+    const previousOrders=new Map(current.map((record)=>[record.id,record.priorityOrder]))
+    const nextOrders=new Map(updates.map((record)=>[record.id,record.priorityOrder]))
+    setRecords((items)=>items.map((record)=>nextOrders.has(record.id)?{...record,priorityOrder:nextOrders.get(record.id)}:record))
+    setReorderBusy(true)
+    try { await updateRecordPriorities(updates,user.uid); notify('Đã lưu thứ tự ưu tiên các mã.') }
+    catch { setRecords((items)=>items.map((record)=>previousOrders.has(record.id)?{...record,priorityOrder:previousOrders.get(record.id)}:record)); notify('Không thể lưu thứ tự ưu tiên.',true) }
+    finally { setReorderBusy(false) }
+  }
   useEffect(()=>setPage(1),[chatDate])
+  useEffect(()=>{if(role!=='admin')setShowPreviousOnly(false)},[role])
   if(loading)return <div className="grid min-h-screen place-items-center bg-canvas"><RefreshCw className="animate-spin text-brand-600"/></div>
   if(!user)return <Login/>
   if(!allowed)return <main className="grid min-h-screen place-items-center bg-canvas p-6 text-center"><div><TriangleAlert className="mx-auto text-amber-500" size={46}/><h1 className="mt-4 text-2xl font-bold">Tài khoản chưa được cấp quyền</h1><p className="mt-2 text-slate-500">Quản trị viên cần tạo tài liệu <code>allowedUsers/{user.uid}</code> trong Firestore.</p><p className="mt-1 text-xs text-slate-400">UID: {user.uid}</p><button className="btn-secondary mx-auto mt-5" onClick={()=>void logout()}><LogOut size={16}/>Đăng xuất</button></div></main>
@@ -103,16 +130,17 @@ function App() {
           {role==='sale'?<select className="input w-auto" aria-label="Lọc ghi chú Sale" value={filters.noteState} onChange={e=>{setFilters({...filters,noteState:e.target.value as Filters['noteState']});setPage(1)}}><option value="all">Tất cả ghi chú</option><option value="noted">Đã ghi chú</option><option value="not-noted">Chưa ghi chú</option></select>:<>
             <select className="input w-auto" aria-label="Lọc nhóm hàng" value={filters.productGroup} onChange={e=>{setFilters({...filters,productGroup:e.target.value as 'all'|ProductGroup});setPage(1)}}><option value="all">Tất cả nhóm hàng</option>{Object.entries(PRODUCT_GROUP_LABELS).map(([value,label])=><option value={value} key={value}>{label}</option>)}</select>
             <select className="input w-auto" value={filters.newState} onChange={e=>{setFilters({...filters,newState:e.target.value as Filters['newState']});setPage(1)}}><option value="all">Tất cả nhãn</option><option value="new">MỚI</option><option value="not-new">KHÔNG MỚI</option></select>
-            <select className="input w-auto" value={filters.change} onChange={e=>{setFilters({...filters,change:e.target.value as Filters['change']});setPage(1)}}><option value="all">Mọi biến động</option><option value="increased">Tăng số lượng</option><option value="decreased">Giảm số lượng</option><option value="new-lot">Lô mới</option><option value="missing-lot">Không ghi nhận</option><option value="unit-changed">Đổi đơn vị</option><option value="unchanged">Không đổi</option></select>
-            <select className="input w-auto" title="Sắp xếp" value={sort} onChange={e=>setSort(e.target.value as typeof sort)}><option value="created">Sắp xếp: Thời gian thêm</option><option value="code">Sắp xếp: Mã</option><option value="name">Sắp xếp: Tên</option></select>
-            <button className="icon-btn" onClick={()=>setDescending(!descending)} title="Đảo chiều sắp xếp" aria-label="Đảo chiều sắp xếp"><ArrowDownAZ className={descending?'rotate-180':''} size={17}/></button>
+            <select className="input w-auto" value={filters.change} onChange={e=>{setFilters({...filters,change:e.target.value as Filters['change']});setPage(1)}}><option value="all">Mọi biến động</option><option value="current-only">Hôm nay có, hôm qua không</option><option value="increased">Tăng số lượng</option><option value="decreased">Giảm số lượng</option><option value="new-lot">Lô mới</option><option value="missing-lot">Không ghi nhận lô</option><option value="unit-changed">Đổi đơn vị</option><option value="unchanged">Không đổi</option></select>
+            <select className="input w-auto" title="Sắp xếp" value={sort} onChange={e=>{const nextSort=e.target.value as typeof sort;setSort(nextSort);setDescending(nextSort==='created')}}><option value="created">Sắp xếp: Mới thêm trước</option><option value="priority">Sắp xếp: Thứ tự kéo thả</option><option value="code">Sắp xếp: Mã</option><option value="name">Sắp xếp: Tên</option></select>
+            {sort!=='priority'&&<button className="icon-btn" onClick={()=>setDescending(!descending)} title="Đảo chiều sắp xếp" aria-label="Đảo chiều sắp xếp"><ArrowDownAZ className={descending?'rotate-180':''} size={17}/></button>}
+            {role==='admin'&&<button type="button" aria-pressed={showPreviousOnly} className={showPreviousOnly?'btn-secondary border-amber-400 bg-amber-50 text-amber-800':'btn-secondary'} onClick={()=>{setShowPreviousOnly((value)=>!value);setPage(1)}}><PackageOpen size={16}/>{showPreviousOnly?'Ẩn mã hôm nay không có':`Kiểm tra mã hôm nay không có (${previousOnlyCount})`}</button>}
             <button className="btn-secondary" onClick={()=>setShowFilters(!showFilters)}><ChevronDown size={16}/>Bộ lọc</button>
             <button className="icon-btn" onClick={()=>{setFilters(emptyFilters);setPage(1)}} title="Xóa bộ lọc" aria-label="Xóa bộ lọc"><FilterX size={17}/></button>
           </>}
           <button className="btn-secondary" disabled={!filtered.length} onClick={()=>setReportOpen(true)}><Eye size={16}/>Xem trước &amp; xuất</button>
         </div>
         {role!=='sale'&&showFilters&&<div className="grid grid-cols-2 gap-3 border-b bg-slate-50 p-3 md:grid-cols-5"><div><label className="label">NSX từ</label><input className="input" type="date" value={filters.productionFrom} onChange={e=>{setFilters({...filters,productionFrom:e.target.value});setPage(1)}}/></div><div><label className="label">NSX đến</label><input className="input" type="date" value={filters.productionTo} onChange={e=>{setFilters({...filters,productionTo:e.target.value});setPage(1)}}/></div><div><label className="label">% date từ</label><input className="input" type="number" min="0" max="100" value={filters.percentMin} onChange={e=>{setFilters({...filters,percentMin:e.target.value});setPage(1)}}/></div><div><label className="label">% date đến</label><input className="input" type="number" min="0" max="100" value={filters.percentMax} onChange={e=>{setFilters({...filters,percentMax:e.target.value});setPage(1)}}/></div><div><label className="label">Phạm vi xuất hiện</label><select className="input" value={filters.presence} onChange={e=>{setFilters({...filters,presence:e.target.value as Filters['presence']});setPage(1)}}><option value="all">Cả hai / một ngày</option><option value="one-side">Chỉ một trong hai ngày</option></select></div></div>}
-        <div className="flex items-center justify-between border-b bg-white px-4 py-2 text-xs text-slate-500"><span>Hiển thị {displayed.length}/{filtered.length} mã phù hợp · luôn hiển thị đầy đủ các lô</span><span>{role==='sale'?formatDate(chatDate):`${formatDate(chatDate)} ↔ ${formatDate(compareDate)}`}</span></div><ComparisonTable rows={displayed} products={products} userId={user.uid} role={role} onAddLot={(row)=>{const product=products.find((item)=>item.id===row.productId);if(product){setDrawerStartsWithNewLot(true);setDrawerProduct(product)}}} notify={notify}/>{totalPages>1&&<div className="flex items-center justify-end gap-2 border-t px-4 py-3"><button className="btn-secondary" disabled={actualPage===1} onClick={()=>setPage(actualPage-1)}>Trang trước</button><span className="text-xs text-slate-500">Trang {actualPage}/{totalPages}</span><button className="btn-secondary" disabled={actualPage===totalPages} onClick={()=>setPage(actualPage+1)}>Trang sau</button></div>}
+        <div className="flex items-center justify-between border-b bg-white px-4 py-2 text-xs text-slate-500"><span>Hiển thị {displayed.length}/{filtered.length} mã phù hợp · luôn hiển thị đầy đủ các lô{role==='admin'&&showPreviousOnly&&previousOnlyCount>0?` · đang hiện ${previousOnlyCount} mã hôm qua có, hôm nay không`:''}{role==='admin'&&sort==='priority'?' · Kéo mã sản phẩm để đổi ưu tiên':''}</span><span>{role==='sale'?formatDate(chatDate):`${formatDate(chatDate)} ↔ ${formatDate(compareDate)}`}</span></div><ComparisonTable rows={displayed} products={products} userId={user.uid} role={role} reorderEnabled={role==='admin'&&sort==='priority'} reorderBusy={reorderBusy} onReorder={(sourceId,targetId)=>void reorderRecords(sourceId,targetId)} onAddLot={(row)=>{const product=products.find((item)=>item.id===row.productId);if(product){setDrawerStartsWithNewLot(true);setDrawerProduct(product)}}} notify={notify}/>{totalPages>1&&<div className="flex items-center justify-end gap-2 border-t px-4 py-3"><button className="btn-secondary" disabled={actualPage===1} onClick={()=>setPage(actualPage-1)}>Trang trước</button><span className="text-xs text-slate-500">Trang {actualPage}/{totalPages}</span><button className="btn-secondary" disabled={actualPage===totalPages} onClick={()=>setPage(actualPage+1)}>Trang sau</button></div>}
       </section>
     </main>
     {pickerOpen&&<ProductPicker products={products} onClose={()=>setPickerOpen(false)} onPick={(product)=>{setPickerOpen(false);setDrawerStartsWithNewLot(false);setDrawerProduct(product)}}/>}{drawerProduct&&<RecordDrawer product={drawerProduct} chatDate={chatDate} current={selectedRecord} previous={selectedPreviousDay} previousDate={previousDayDate} canViewPreviousInline={role==='admin'} startWithNewLot={drawerStartsWithNewLot} userId={user.uid} onClose={()=>{setDrawerProduct(undefined);setDrawerStartsWithNewLot(false)}} notify={notify}/>}<Suspense fallback={<div className="fixed inset-0 z-[75] grid place-items-center bg-slate-950/40 text-white"><span className="flex items-center gap-2 rounded-xl bg-slate-900 px-4 py-3"><RefreshCw className="animate-spin" size={17}/>Đang tải công cụ…</span></div>}>{productsOpen&&<ProductManager products={products} onClose={()=>setProductsOpen(false)} notify={notify}/>} {reportOpen&&<ReportExportDialog rows={filtered} products={products} date={chatDate} onClose={()=>setReportOpen(false)} notify={notify}/>} {adminOpen&&role==='admin'&&<AdminPanel currentUid={user.uid} onClose={()=>setAdminOpen(false)} notify={notify}/>} {auditOpen&&role==='admin'&&<AuditPanel onClose={()=>setAuditOpen(false)}/>}</Suspense> {cloneOpen&&role==='admin'&&<CloneDateDialog availableDates={availableDates} defaultSourceDate={compareDate} defaultTargetDate={chatDate} userId={user.uid} onClose={()=>setCloneOpen(false)} onCompleted={(targetDate,message)=>{setCloneOpen(false);setChatDate(targetDate);setManualCompare(false);notify(message)}}/>} {toast&&<div className={`toast ${toast.error?'toast-error':'toast-success'}`} role="status" aria-live="polite">{toast.error?<TriangleAlert size={18}/>:<Cloud size={18}/>} {toast.message}</div>}

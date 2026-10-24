@@ -68,6 +68,14 @@ export async function updateSaleNote(recordId: string, saleNote: string, userId:
   })
 }
 
+export async function updateRecordPriorities(records: Array<{ id: string; priorityOrder: number }>, userId: string): Promise<void> {
+  await commitChunks(records, (batch, record) => batch.set(doc(db, 'dateRecords', record.id), {
+    priorityOrder: record.priorityOrder,
+    updatedBy: userId,
+    updatedAt: serverTimestamp(),
+  }, { merge: true }))
+}
+
 export async function updateSaleWorkflow(recordId: string, saleWorkflow: SaleWorkflow, userId: string): Promise<void> {
   await updateDoc(doc(db, 'dateRecords', recordId), {
     saleWorkflow: clean(saleWorkflow),

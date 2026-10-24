@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Download, FileText, LoaderCircle, Minus, Palette, Plus, Printer, RotateCcw, X } from 'lucide-react'
+import { Check, ChevronDown, Download, FileText, LoaderCircle, Minus, Palette, Plus, Printer, RotateCcw, Sparkles, X } from 'lucide-react'
 import { formatDate } from '../lib/date'
-import { createNearDatePdfBlob, estimateOptimizedPageCount, exportNearDateReport, prepareNearDateReport, resolveReportOrientation } from '../lib/reportExport'
-import type { ReportLayoutMode, ReportOrientation, ReportPrintMode, ReportTuning } from '../lib/reportExport'
+import { createNearDatePdfBlob, estimateOptimizedPageCount, exportNearDateReport, prepareNearDateReport, reportEmphasisKey, resolveReportOrientation } from '../lib/reportExport'
+import type { ReportEmphasisSuggestion, ReportLayoutMode, ReportOrientation, ReportPrintMode, ReportTuning } from '../lib/reportExport'
 import type { ComparedProduct, Product } from '../types'
+import { analyzeReportEmphasis } from '../services/gemini'
 
 type ReportExportDialogProps = {
   rows: ComparedProduct[]
@@ -22,7 +23,14 @@ export function ReportExportDialog({ rows, products, date, onClose, notify }: Re
   const [previewUrl, setPreviewUrl] = useState<string>()
   const [previewError, setPreviewError] = useState(false)
   const [exporting, setExporting] = useState<'docx' | 'pdf'>()
+  const [analyzing,setAnalyzing]=useState(false)
+  const [aiSuggestions,setAiSuggestions]=useState<ReportEmphasisSuggestion[]>([])
+  const [selectedEmphasis,setSelectedEmphasis]=useState<string[]>([])
+  const [aiPanelOpen,setAiPanelOpen]=useState(false)
+  const [aiModel,setAiModel]=useState('')
   const report = useMemo(() => prepareNearDateReport(rows, products), [rows, products])
+  const reportSignature=useMemo(()=>JSON.stringify(report),[report])
+  const [analyzedSignature,setAnalyzedSignature]=useState('')
   const lotCount = useMemo(() => report.reduce((sum, item) => sum + item.lots.length, 0), [report])
   const actualOrientation = useMemo(() => resolveReportOrientation(report, orientation, layoutMode), [report, orientation, layoutMode])
   const tuning = useMemo<ReportTuning>(()=>({densityLevel,fontLevel}),[densityLevel,fontLevel])
@@ -44,7 +52,7 @@ export function ReportExportDialog({ rows, products, date, onClose, notify }: Re
     let objectUrl: string | undefined
     setPreviewUrl(undefined)
     setPreviewError(false)
-    void createNearDatePdfBlob(report, date, orientation, printMode, layoutMode,tuning)
+    void createNearDatePdfBlob(report, date, orientation, printMode, layoutMode,tuning,selectedEmphasis)
       .then((blob) => {
         objectUrl = URL.createObjectURL(blob)
         if (cancelled) URL.revokeObjectURL(objectUrl)
@@ -58,12 +66,58 @@ export function ReportExportDialog({ rows, products, date, onClose, notify }: Re
       cancelled = true
       if (objectUrl) URL.revokeObjectURL(objectUrl)
     }
-  }, [report, date, orientation, printMode, layoutMode,tuning])
+  }, [report, date, orientation, printMode, layoutMode,tuning,selectedEmphasis])
+
+  useEffect(()=>{
+    if(analyzedSignature&&analyzedSignature!==reportSignature){setAiSuggestions([]);setSelectedEmphasis([]);setAiPanelOpen(false);setAnalyzedSignature('');notify('Dữ liệu báo cáo đã thay đổi. Đề xuất tô đậm AI cũ đã được bỏ để tránh áp dụng sai.')}
+  },[analyzedSignature,reportSignature,notify])
+
+  function suggestionKeys(suggestion:ReportEmphasisSuggestion) {
+    return [
+      ...suggestion.fields.map((field)=>reportEmphasisKey(suggestion.productCode,field)),
+      ...suggestion.lots.flatMap((lot)=>lot.fields.map((field)=>reportEmphasisKey(suggestion.productCode,field,lot.productionDate,lot.datePercent))),
+    ]
+  }
+
+  function normalizeSuggestions(raw:ReportEmphasisSuggestion[]) {
+    const allowedProductFields=new Set(['productCode','productName','saleNote'])
+    const allowedLotFields=new Set(['productionDate','datePercent'])
+    return raw.flatMap((suggestion):ReportEmphasisSuggestion[]=>{
+      const item=report.find((product)=>product.productCode===suggestion?.productCode)
+      if(!item)return[]
+      const fields=Array.isArray(suggestion.fields)?suggestion.fields.filter((field)=>allowedProductFields.has(field)):[]
+      const lots=Array.isArray(suggestion.lots)?suggestion.lots.flatMap((lot)=>{
+        const match=item.lots.find((candidate)=>candidate.productionDate===lot?.productionDate&&candidate.datePercent===lot?.datePercent)
+        if(!match)return[]
+        const lotFields=Array.isArray(lot.fields)?lot.fields.filter((field)=>allowedLotFields.has(field)):[]
+        return lotFields.length?[{productionDate:match.productionDate,datePercent:match.datePercent,fields:lotFields as Array<'productionDate'|'datePercent'>}]:[]
+      }):[]
+      if(!fields.length&&!lots.length)return[]
+      return [{productCode:item.productCode,fields:fields as ReportEmphasisSuggestion['fields'],lots,reason:typeof suggestion.reason==='string'?suggestion.reason.slice(0,300):'Cần thủ kho chú ý.'}]
+    })
+  }
+
+  async function runAiAnalysis() {
+    setAnalyzing(true)
+    try{
+      const result=await analyzeReportEmphasis(report)
+      const suggestions=normalizeSuggestions(result.suggestions)
+      const selected=[...new Set(suggestions.flatMap(suggestionKeys))]
+      setAiSuggestions(suggestions);setSelectedEmphasis(selected);setAiModel(result.model);setAiPanelOpen(true);setAnalyzedSignature(reportSignature)
+      notify(suggestions.length?`Gemini đề xuất tô đậm ${suggestions.length} mã. Hãy kiểm tra trước khi xuất.`:'Gemini không thấy mục nào cần tô đậm đặc biệt.')
+    }catch(error){console.error(error);notify(error instanceof Error?error.message:'Không thể phân tích bằng Gemini.',true)}finally{setAnalyzing(false)}
+  }
+
+  function toggleSuggestion(suggestion:ReportEmphasisSuggestion) {
+    const keys=suggestionKeys(suggestion)
+    const enabled=keys.some((key)=>selectedEmphasis.includes(key))
+    setSelectedEmphasis((current)=>enabled?current.filter((key)=>!keys.includes(key)):[...new Set([...current,...keys])])
+  }
 
   const runExport = async (type: 'docx' | 'pdf') => {
     setExporting(type)
     try {
-      await exportNearDateReport(rows, date, type, products, orientation, printMode, layoutMode,tuning)
+      await exportNearDateReport(rows, date, type, products, orientation, printMode, layoutMode,tuning,selectedEmphasis)
       notify(`Đã tạo file ${type === 'docx' ? 'Word' : 'PDF'} ${layoutLabel}, khổ ${actualOrientation === 'portrait' ? 'dọc' : 'ngang'}${layoutMode === 'optimized' ? `, dự kiến ${estimatedPageCount} trang` : orientation === 'auto' ? ' tự động' : ''}${printMode === 'monochrome' ? ', tối ưu in trắng đen' : ', bản màu'}.`)
     } catch (error) {
       console.error(error)
@@ -106,6 +160,15 @@ export function ReportExportDialog({ rows, products, date, onClose, notify }: Re
         </div>}
         <button type="button" className="icon-btn" onClick={onClose} aria-label="Đóng"><X size={18}/></button>
       </header>
+
+      <div className="border-b bg-violet-50/70 px-5 py-3">
+        <div className="flex flex-wrap items-center gap-3">
+          <button type="button" className={`btn-primary border-violet-700 bg-violet-700 hover:bg-violet-800 ${analyzing?'ai-loading-border':''}`} disabled={analyzing||!report.length} onClick={()=>void runAiAnalysis()}>{analyzing?<LoaderCircle className="animate-spin" size={16}/>:<Sparkles size={16}/>} {analyzing?'Gemini đang phân tích…':aiSuggestions.length?'Phân tích lại cách tô đậm':'AI đề xuất tô đậm'}</button>
+          <div className="min-w-56 flex-1"><p className="text-sm font-semibold text-violet-950">Áp dụng trực tiếp lên bản preview hiện tại</p><p className="text-xs text-violet-700">Không tạo bản mới, không sửa mã, ngày, % date hay ghi chú.</p></div>
+          {aiSuggestions.length>0&&<><span className="rounded-full bg-white px-3 py-1.5 text-xs font-bold text-violet-700 ring-1 ring-violet-200">{aiSuggestions.filter((suggestion)=>suggestionKeys(suggestion).some((key)=>selectedEmphasis.includes(key))).length}/{aiSuggestions.length} mã đang áp dụng</span><button type="button" className="btn-secondary h-9 border-violet-200 text-violet-700" onClick={()=>setAiPanelOpen(!aiPanelOpen)}>Kiểm tra đề xuất <ChevronDown className={`transition ${aiPanelOpen?'rotate-180':''}`} size={15}/></button><button type="button" className="btn-secondary h-9" disabled={!selectedEmphasis.length} onClick={()=>setSelectedEmphasis([])}><RotateCcw size={14}/>Bỏ toàn bộ tô đậm AI</button></>}
+        </div>
+        {aiPanelOpen&&aiSuggestions.length>0&&<div className="mt-3 max-h-48 overflow-y-auto rounded-xl border border-violet-200 bg-white shadow-sm"><div className="sticky top-0 flex items-center justify-between border-b bg-white px-4 py-2 text-xs text-slate-500"><span>Chọn các đề xuất muốn áp dụng vào preview và file xuất</span>{aiModel&&<span>{aiModel}</span>}</div><div className="divide-y">{aiSuggestions.map((suggestion,index)=>{const keys=suggestionKeys(suggestion);const enabled=keys.some((key)=>selectedEmphasis.includes(key));return <button type="button" className="flex w-full items-start gap-3 px-4 py-3 text-left hover:bg-violet-50" key={`${suggestion.productCode}-${index}`} onClick={()=>toggleSuggestion(suggestion)}><span className={`mt-0.5 grid h-5 w-5 shrink-0 place-items-center rounded border ${enabled?'border-violet-600 bg-violet-600 text-white':'border-slate-300 bg-white'}`}>{enabled&&<Check size={13}/>}</span><span className="min-w-24 font-bold text-brand-700">{suggestion.productCode}</span><span className="flex-1"><span className="block text-sm text-slate-800">{suggestion.reason}</span><span className="mt-0.5 block text-xs text-slate-500">Tô đậm: {[...suggestion.fields,...suggestion.lots.flatMap((lot)=>lot.fields.map((field)=>`${field} ${formatDate(lot.productionDate)}`))].join(', ')}</span></span></button>})}</div></div>}
+      </div>
 
       {layoutMode==='optimized'&&<div className="flex flex-wrap items-center gap-3 border-b bg-slate-50 px-5 py-3">
         <div className="flex items-center gap-2"><span className="text-xs font-bold uppercase tracking-wide text-slate-500">Mật độ dòng</span><div className="flex items-center gap-1 rounded-lg border bg-white p-1"><button type="button" className="flex h-8 items-center gap-1 rounded-md px-2 text-xs font-semibold text-slate-700 hover:bg-slate-100 disabled:opacity-40" disabled={densityLevel<=-2} onClick={()=>setDensityLevel((value)=>Math.max(-2,value-1))}><Minus size={14}/>Co dòng</button><span className="min-w-20 text-center text-xs font-bold text-brand-700">{densityLabel}</span><button type="button" className="flex h-8 items-center gap-1 rounded-md px-2 text-xs font-semibold text-slate-700 hover:bg-slate-100 disabled:opacity-40" disabled={densityLevel>=2} onClick={()=>setDensityLevel((value)=>Math.min(2,value+1))}><Plus size={14}/>Giãn dòng</button></div></div>

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { mkdir, writeFile } from 'node:fs/promises'
-import { createNearDatePdfBlob, createNearDateWordBlob, estimateOptimizedPageCount, prepareNearDateReport, resolveReportOrientation } from './reportExport'
+import { createNearDatePdfBlob, createNearDateWordBlob, estimateOptimizedPageCount, prepareNearDateReport, reportEmphasisKey, resolveReportOrientation } from './reportExport'
 import type { NearDateReportProduct } from './reportExport'
 import type { ComparedProduct, DateRecord, Product } from '../types'
 
@@ -24,6 +24,12 @@ const row: ComparedProduct = {
 }
 
 describe('prepareNearDateReport', () => {
+  it('tạo khóa tô đậm riêng cho từng trường và từng lô', () => {
+    expect(reportEmphasisKey('SP001','saleNote')).toBe('SP001|saleNote||')
+    expect(reportEmphasisKey('SP001','productionDate','2026-10-01',40)).toBe('SP001|productionDate|2026-10-01|40')
+    expect(reportEmphasisKey('SP001','datePercent','2026-10-01',40)).not.toBe(reportEmphasisKey('SP001','productionDate','2026-10-01',40))
+  })
+
   it('giữ % date theo từng NSX và ghi chú Sale theo mã', () => {
     const [result] = prepareNearDateReport([row], [product])
     expect(result.saleNote).toBe('Ưu tiên xuất trước')
@@ -76,13 +82,19 @@ describe('prepareNearDateReport', () => {
         datePercent: 25 + lotIndex * 13,
       })),
     }))
-    const [wordAuto, pdfAuto, wordLandscape, pdfLandscape, wordPortrait, pdfPortrait] = await Promise.all([
+    const sampleEmphasis = [
+      reportEmphasisKey('SP001','productName'),
+      reportEmphasisKey('SP001','saleNote'),
+      reportEmphasisKey('SP001','datePercent','2026-10-01',25),
+    ]
+    const [wordAuto, pdfAuto, wordLandscape, pdfLandscape, wordPortrait, pdfPortrait, pdfAiEmphasis] = await Promise.all([
       createNearDateWordBlob(report, '2026-10-22'),
       createNearDatePdfBlob(report, '2026-10-22'),
       createNearDateWordBlob(report, '2026-10-22', 'landscape'),
       createNearDatePdfBlob(report, '2026-10-22', 'landscape'),
       createNearDateWordBlob(report, '2026-10-22', 'portrait'),
       createNearDatePdfBlob(report, '2026-10-22', 'portrait'),
+      createNearDatePdfBlob(report, '2026-10-22', 'portrait', 'monochrome', 'optimized', undefined, sampleEmphasis),
     ])
     expect(resolveReportOrientation(report, 'auto', 'optimized')).toBe('portrait')
     expect(resolveReportOrientation(report, 'landscape', 'optimized')).toBe('portrait')
@@ -101,6 +113,7 @@ describe('prepareNearDateReport', () => {
     expect(pdfLandscape.size).toBeGreaterThan(10_000)
     expect(wordPortrait.size).toBeGreaterThan(10_000)
     expect(pdfPortrait.size).toBeGreaterThan(10_000)
+    expect(pdfAiEmphasis.size).toBeGreaterThan(10_000)
     const output = process.env.REPORT_QA_OUTPUT
     if (output) {
       await mkdir(output, { recursive: true })
@@ -111,6 +124,7 @@ describe('prepareNearDateReport', () => {
         writeFile(`${output}/can-date-kho-gon-ngang.pdf`, Buffer.from(await pdfLandscape.arrayBuffer())),
         writeFile(`${output}/can-date-kho-gon-doc.docx`, Buffer.from(await wordPortrait.arrayBuffer())),
         writeFile(`${output}/can-date-kho-gon-doc.pdf`, Buffer.from(await pdfPortrait.arrayBuffer())),
+        writeFile(`${output}/can-date-ai-to-dam.pdf`, Buffer.from(await pdfAiEmphasis.arrayBuffer())),
       ])
     }
   }, 20_000)
