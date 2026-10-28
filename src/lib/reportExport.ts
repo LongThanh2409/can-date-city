@@ -1,5 +1,5 @@
 import type { Content, ContentText, TableCell, TableCellProperties, TDocumentDefinitions } from 'pdfmake/interfaces'
-import { lotQuantityInPacks, packagingSummary } from '../domain/product'
+import { lotQuantityInPacks, packagingSummary, PRODUCT_GROUP_LABELS } from '../domain/product'
 import { formatDate } from './date'
 import type { ComparedProduct, Product } from '../types'
 
@@ -14,6 +14,7 @@ export type NearDateReportProduct = {
   productName: string
   vietnameseName: string
   packaging: string
+  productGroup: string
   saleNote: string
   isNewDate: boolean
   lots: NearDateReportLot[]
@@ -23,6 +24,7 @@ export type ReportOrientation = 'auto' | 'portrait' | 'landscape'
 export type ReportPrintMode = 'monochrome' | 'color'
 export type ReportLayoutMode = 'optimized' | 'compact' | 'detailed'
 export type ReportTuning = { densityLevel: number; fontLevel: number }
+export type ReportPageTarget = 2 | 3
 export type ReportEmphasisField = 'productCode' | 'productName' | 'saleNote' | 'productionDate' | 'datePercent'
 export type ReportEmphasisSuggestion = {
   productCode: string
@@ -47,8 +49,10 @@ type ReportSegment = {
   item: NearDateReportProduct
   lots: NearDateReportLot[]
   continued: boolean
-  estimatedHeight: number
+  lotRowHeight?: number
 }
+type OptimizedLayout = { autoScale: number; segments: ReportSegment[]; pages: ReportSegment[][] }
+type PdfMake = typeof import('pdfmake/build/pdfmake')['default']
 
 const BRAND = '115E59'
 const BRAND_LIGHT = 'CCFBF1'
@@ -56,6 +60,14 @@ const NOTE_FILL = 'FFF7D6'
 const NOTE_INK = '713F12'
 const BORDER = 'CBD5E1'
 const MUTED = '64748B'
+const A4_WIDTH = 595.28
+const A4_HEIGHT = 841.89
+const OPTIMIZED_PAGE_MARGINS: [number, number, number, number] = [10, 12, 10, 15]
+// Rows are measured with pdfMake itself, so only a tiny reserve is needed to keep
+// the last row from being pushed onto an extra, almost empty page.
+const OPTIMIZED_PAGE_RESERVE = 2
+const MIN_AUTO_LAYOUT_SCALE = 0.78
+const PRODUCT_GROUP_ORDER = ['Hàng đông lạnh', 'Hàng chill', 'Xúc xích tiệt trùng', 'Hàng thường']
 
 function reportTuningFactors(tuning: ReportTuning = DEFAULT_REPORT_TUNING) {
   const densityLevel = Math.max(-2, Math.min(2, Math.round(tuning.densityLevel)))
@@ -70,12 +82,30 @@ function tunedFontSize(size: number, tuning: ReportTuning) {
   return Math.round(size * reportTuningFactors(tuning).font * 10) / 10
 }
 
-function optimizedReportSegments(report: NearDateReportProduct[], narrow: boolean, tuning: ReportTuning) {
-  const { density, font } = reportTuningFactors(tuning)
-  return reportSegments(report,narrow).map((segment)=>({
-    ...segment,
-    estimatedHeight: Math.ceil(segment.estimatedHeight*density*font),
-  }))
+function groupOrder(label: string) {
+  const index = PRODUCT_GROUP_ORDER.indexOf(label)
+  return index < 0 ? PRODUCT_GROUP_ORDER.length : index
+}
+
+function sortedReportByGroup(report: NearDateReportProduct[]) {
+  return report.map((item,index)=>({item,index})).sort((left,right)=>groupOrder(left.item.productGroup)-groupOrder(right.item.productGroup)||left.index-right.index).map(({item})=>item)
+}
+
+function groupRowSpans(segments: ReportSegment[]) {
+  const spans = new Map<number,number>()
+  let offset = 0
+  while (offset < segments.length) {
+    const label = segments[offset].item.productGroup
+    let end = offset
+    let rows = 0
+    while (end < segments.length && segments[end].item.productGroup === label) {
+      rows += segments[end].lots.length
+      end += 1
+    }
+    spans.set(offset,rows)
+    offset = end
+  }
+  return spans
 }
 
 function fileDate(date: string) {
@@ -87,23 +117,12 @@ function numberText(value: number | null) {
   return value === null ? '—' : new Intl.NumberFormat('vi-VN', { maximumFractionDigits: 2 }).format(value)
 }
 
-function reportSegments(report: NearDateReportProduct[], narrow: boolean): ReportSegment[] {
+function reportSegments(report: NearDateReportProduct[]): ReportSegment[] {
   const result: ReportSegment[] = []
   report.forEach((item) => {
     const lots = item.lots.length ? item.lots : [{ productionDate: '', quantityPacks: null, datePercent: 0 }]
     for (let offset = 0; offset < lots.length; offset += 8) {
-      const segmentLots = lots.slice(offset, offset + 8)
-      const name = item.vietnameseName || item.productName || 'Chưa bổ sung tên sản phẩm'
-      const productChars = narrow ? 24 : 32
-      const noteChars = narrow ? 31 : 48
-      const productLines = Math.max(1, Math.ceil(name.length / productChars))
-      const noteLines = item.saleNote ? Math.ceil(item.saleNote.length / noteChars) : 1
-      result.push({
-        item,
-        lots: segmentLots,
-        continued: offset > 0,
-        estimatedHeight: Math.max(segmentLots.length * 12, productLines * 9 + 5, noteLines * 9.5 + 6),
-      })
+      result.push({ item, lots: lots.slice(offset, offset + 8), continued: offset > 0 })
     }
   })
   return result
@@ -115,105 +134,183 @@ export function resolveReportOrientation(_report: NearDateReportProduct[], orien
   return 'portrait'
 }
 
-function paginateReportSegments(segments: ReportSegment[], orientation: ResolvedReportOrientation): ReportSegment[][] {
-  if (!segments.length) return [[]]
-  const physicalCapacity = orientation === 'landscape' ? 515 : 715
-  const maximumPanels = orientation === 'landscape' ? 4 : 2
-  const totalHeight = segments.reduce((sum, segment) => sum + segment.estimatedHeight, 0)
-  const desiredPanels = Math.min(maximumPanels, Math.max(1, Math.ceil(totalHeight / physicalCapacity)))
-  const largest = Math.max(...segments.map((segment) => segment.estimatedHeight))
-  // The height estimate deliberately errs on the safe side for long product names and notes.
-  // Once all four landscape panels are needed, balancing their estimated height is more
-  // accurate than clamping every panel to the conservative single-panel capacity.
-  const target = Math.max(largest, totalHeight / desiredPanels * 1.12)
-  const panels: ReportSegment[][] = []
-  let panel: ReportSegment[] = []
-  let height = 0
-  segments.forEach((segment) => {
-    if (panel.length && height + segment.estimatedHeight > target) {
-      panels.push(panel)
-      panel = []
-      height = 0
-    }
-    panel.push(segment)
-    height += segment.estimatedHeight
+let pdfMakeLoader: Promise<PdfMake> | undefined
+
+function loadPdfMake() {
+  pdfMakeLoader ??= Promise.all([
+    import('pdfmake/build/pdfmake'),
+    import('pdfmake/build/fonts/Roboto'),
+  ]).then(([{ default: pdfMake }, { default: roboto }]) => {
+    pdfMake.addFontContainer(roboto)
+    return pdfMake
   })
-  if (panel.length) panels.push(panel)
-  return panels
+  return pdfMakeLoader
 }
 
-function balanceReportSegments(segments: ReportSegment[], requestedPanelCount: number): ReportSegment[][] {
-  if (!segments.length) return [[]]
-  const panelCount = Math.min(requestedPanelCount, segments.length)
-  const panels: ReportSegment[][] = []
-  let offset = 0
-  let remainingHeight = segments.reduce((sum, segment) => sum + segment.estimatedHeight, 0)
-  for (let panelIndex = 0; panelIndex < panelCount - 1; panelIndex += 1) {
-    const remainingPanels = panelCount - panelIndex
-    const target = remainingHeight / remainingPanels
-    const lastAllowedOffset = segments.length - (remainingPanels - 1)
-    let height = 0
-    let end = offset
-    while (end < lastAllowedOffset) {
-      const nextHeight = segments[end].estimatedHeight
-      if (end > offset && Math.abs(target - height) <= Math.abs(target - height - nextHeight)) break
-      height += nextHeight
-      end += 1
-    }
-    panels.push(segments.slice(offset, end))
-    offset = end
-    remainingHeight -= height
+function optimizedTitleText(report: NearDateReportProduct[], date: string) {
+  return `DANH SÁCH HÀNG CẬN DATE  •  ${formatDate(date)}  •  ${report.length} mã  •  ${report.reduce((sum, item) => sum + item.lots.length, 0)} dòng NSX`
+}
+
+function optimizedPdfCells(printMode: ReportPrintMode, tuning: ReportTuning, autoScale: number, emphasis: ReportEmphasis) {
+  const monochrome = printMode === 'monochrome'
+  const { density } = reportTuningFactors(tuning)
+  const effectiveDensity = density*autoScale
+  const font = (size: number) => Math.round(tunedFontSize(size,tuning)*autoScale*10)/10
+  const margin = (value: [number,number,number,number]): [number,number,number,number] => [value[0],value[1]*effectiveDensity,value[2],value[3]*effectiveDensity]
+  // Density changes the line spacing as well as the padding, so "Co dòng/Giãn dòng" stays visible.
+  const lineHeight = Math.min(1.45, Math.max(1, Math.round(1.18*density*(0.5+autoScale/2)*100)/100))
+  const textMargin = margin([2.5,2,2.5,2])
+  const lotMargin = margin([1,2,1,2])
+  const innerLineWidth = monochrome ? 0.55 : 0.45
+  const vLineWidth = (lineIndex: number) => monochrome ? (lineIndex === 0 || lineIndex === 7 ? 0.9 : 0.45) : 0.4
+  // A '*' column is sized from the content of the whole table, so a long unbreakable word
+  // (a link, a code) gave the note column a different width when measuring every product
+  // than when drawing one page. A fixed width keeps note wrapping identical in both passes.
+  const fixedWidths = [132, 46, 66, 52, 40]
+  const groupWidth = 55
+  const tableWidth = A4_WIDTH - OPTIMIZED_PAGE_MARGINS[0] - OPTIMIZED_PAGE_MARGINS[2]
+  const noteWidth = tableWidth - [...fixedWidths, groupWidth].reduce((sum, width) => sum + width, 0) - Array.from({ length: 8 }, (_, index) => vLineWidth(index)).reduce((sum, width) => sum + width, 0)
+  return {
+    innerLineWidth,
+    widths: [...fixedWidths, noteWidth, groupWidth] as (number | string)[],
+    title: (text: string): Content => ({ text, bold: true, alignment: 'center', color: monochrome ? '#000000' : `#${BRAND}`, fontSize: font(7.5), margin: [0,0,0,5] }),
+    header: (): TableCell[] => ['TÊN SẢN PHẨM', 'MỚI?', 'NSX', 'SL (GÓI)', '%', 'GHI CHÚ SALE', 'NHÓM'].map((label) => pdfCell(label, {
+      bold: true,
+      color: monochrome ? '#000000' : `#${BRAND}`,
+      fillColor: monochrome ? '#E7E7E7' : `#${BRAND_LIGHT}`,
+      alignment: 'center',
+      fontSize: font(7),
+      margin: margin([2,2,2,2]),
+    })),
+    layout: {
+      hLineColor: () => monochrome ? '#000000' : `#${BORDER}`,
+      vLineColor: () => monochrome ? '#000000' : `#${BORDER}`,
+      hLineWidth: (lineIndex: number) => lineIndex === 0 && monochrome ? 1 : innerLineWidth,
+      vLineWidth,
+      paddingLeft: () => 0,
+      paddingRight: () => 0,
+      paddingTop: () => 0,
+      paddingBottom: () => 0,
+    },
+    name: (item: NearDateReportProduct, continued: boolean, rowSpan: number) => pdfCell([{text:`${item.vietnameseName || item.productName || 'Chưa bổ sung tên'}${continued?' (tiếp)':''}`,bold:emphasized(emphasis,item,'productCode')||emphasized(emphasis,item,'productName'),color:monochrome?'#000000':`#${BRAND}`,fontSize:font(8.8)}],{rowSpan,alignment:'left',fillColor:'#FFFFFF',lineHeight,margin:textMargin}),
+    isNew: (item: NearDateReportProduct, rowSpan: number) => pdfCell(item.isNewDate?'CÓ':'KHÔNG',{rowSpan,bold:true,color:monochrome?'#000000':`#${BRAND}`,alignment:'center',fontSize:font(7),lineHeight,margin:lotMargin}),
+    productionDate: (item: NearDateReportProduct, lot: NearDateReportLot, id?: string) => pdfCell(lot.productionDate?formatDate(lot.productionDate):'—',{id,bold:emphasized(emphasis,item,'productionDate',lot),alignment:'center',fontSize:font(7.5),lineHeight,margin:lotMargin}),
+    quantity: (lot: NearDateReportLot) => pdfCell(pdfQuantity(lot.quantityPacks,font(7.7)),{alignment:'center',lineHeight,margin:lotMargin}),
+    datePercent: (item: NearDateReportProduct, lot: NearDateReportLot) => pdfCell(lot.productionDate?`${lot.datePercent}%`:'—',{bold:emphasized(emphasis,item,'datePercent',lot),color:monochrome?'#000000':`#${BRAND}`,alignment:'center',fontSize:font(8.5),lineHeight,margin:lotMargin}),
+    note: (item: NearDateReportProduct, rowSpan: number) => pdfCell(item.saleNote||'',{rowSpan,bold:emphasized(emphasis,item,'saleNote'),color:monochrome?'#000000':item.saleNote?'#422006':`#${MUTED}`,alignment:item.saleNote?'left':'center',fillColor:item.saleNote&&!monochrome?`#${NOTE_FILL}`:'#FFFFFF',fontSize:font(7.6),lineHeight,margin:textMargin}),
+    group: (label: string, rowSpan: number, border?: [boolean,boolean,boolean,boolean]) => pdfCell(label,{rowSpan,border,bold:true,alignment:'center',fontSize:font(6.5),lineHeight,margin:lotMargin}),
+    blank: () => pdfCell('', { fontSize: font(6.5), lineHeight, margin: lotMargin }),
   }
-  panels.push(segments.slice(offset))
-  return panels
 }
 
-function paginateOptimizedPortrait(segments: ReportSegment[]): ReportSegment[][] {
-  if (!segments.length) return [[]]
-  // Keep a small safety reserve for real font wrapping and the page footer.
-  // The estimator cannot perfectly predict long Vietnamese notes or code-like words.
-  const pageCapacity = 560
+function continuedGroupLabel(label: string) {
+  return `${label} (tiếp)`
+}
+
+// Lays every segment out once on a very tall page and reads back the real row positions.
+// This replaces character-count estimates, so pages can be filled right to the bottom.
+async function measureOptimizedLayout(pdfMake: PdfMake, report: NearDateReportProduct[], date: string, printMode: ReportPrintMode, tuning: ReportTuning, emphasis: ReportEmphasis, autoScale: number): Promise<OptimizedLayout> {
+  const cells = optimizedPdfCells(printMode,tuning,autoScale,emphasis)
+  const segments = reportSegments(report)
+  const sampleItem = report[0]
+  const sampleLot: NearDateReportLot = { productionDate: '2026-12-31', quantityPacks: 88_888, datePercent: 100 }
+  const groupLabels = [...new Set(segments.map((segment) => segment.item.productGroup))].flatMap((label) => [label, continuedGroupLabel(label)])
+  const probeRow = (id: string, group = ''): TableCell[] => [cells.blank(), cells.blank(), cells.productionDate(sampleItem,sampleLot,id), cells.quantity(sampleLot), cells.datePercent(sampleItem,sampleLot), cells.blank(), group ? cells.group(group,1) : cells.blank()]
+  const body: TableCell[][] = [
+    cells.header(),
+    ...segments.map(({ item, lots, continued }, index) => [cells.name(item,continued,1), cells.isNew(item,1), cells.productionDate(item,lots[0],`segment-${index}`), cells.quantity(lots[0]), cells.datePercent(item,lots[0]), cells.note(item,1), cells.blank()]),
+    probeRow('lot'),
+    ...groupLabels.map((label, index) => probeRow(`group-${index}`, label)),
+    probeRow('end'),
+  ]
+  const tops = new Map<string, number>()
+  await pdfMake.createPdf({
+    pageSize: { width: A4_WIDTH, height: Math.max(A4_HEIGHT, body.length * 160) },
+    pageMargins: OPTIMIZED_PAGE_MARGINS,
+    defaultStyle: { font: 'Roboto', fontSize: 10, color: '#0F172A', lineHeight: 1.18 },
+    content: [cells.title(optimizedTitleText(report,date)), { table: { widths: cells.widths, body }, layout: cells.layout } as Content],
+    pageBreakBefore: (node) => {
+      if (node.id && node.startPosition) tops.set(node.id, node.startPosition.top)
+      return false
+    },
+  }).getBuffer()
+  const ids = [...segments.map((_, index) => `segment-${index}`), 'lot', ...groupLabels.map((_, index) => `group-${index}`), 'end']
+  const pitch = (index: number) => (tops.get(ids[index + 1]) ?? 0) - (tops.get(ids[index]) ?? 0)
+  const lotPitch = pitch(segments.length)
+  const groupHeights = new Map(groupLabels.map((label, index) => [label, pitch(segments.length + 1 + index)]))
+  const measured = segments.map((segment, index) => {
+    // pdfMake gives a row-span cell only the sum of the row heights, without the lines between them.
+    const spanHeight = pitch(index) - cells.innerLineWidth
+    const lotRowHeight = Math.max(lotPitch - cells.innerLineWidth, spanHeight / segment.lots.length)
+    return { ...segment, lotRowHeight: Math.ceil(lotRowHeight * 10) / 10 }
+  })
+  const segmentHeight = (segment: ReportSegment) => segment.lots.length * ((segment.lotRowHeight ?? 0) + cells.innerLineWidth)
+  // The group label sits in the first lot row of each group run; a label taller than
+  // that row makes the row grow, so the page height includes the difference.
+  const pageHeight = (page: ReportSegment[], previousGroup?: string) => page.reduce((height, segment, index) => {
+    const label = segment.item.productGroup
+    const runStart = index === 0 || page[index - 1].item.productGroup !== label
+    if (!runStart) return height + segmentHeight(segment)
+    const groupHeight = groupHeights.get(index === 0 && previousGroup === label ? continuedGroupLabel(label) : label) ?? 0
+    return height + segmentHeight(segment) + Math.max(0, groupHeight - (segment.lotRowHeight ?? 0) - cells.innerLineWidth)
+  }, 0)
+  const available = A4_HEIGHT - OPTIMIZED_PAGE_MARGINS[3] - OPTIMIZED_PAGE_RESERVE - (tops.get(ids[0]) ?? 0)
   const pages: ReportSegment[][] = []
   let page: ReportSegment[] = []
-  let usedHeight = 0
-  // Fill the current page before opening the next one. Balancing all pages evenly
-  // leaves a large blank area when the report only slightly exceeds one page.
-  segments.forEach((segment) => {
-    if (page.length && usedHeight + segment.estimatedHeight > pageCapacity) {
+  measured.forEach((segment) => {
+    const previousGroup = pages.at(-1)?.at(-1)?.item.productGroup
+    if (page.length && pageHeight([...page, segment], previousGroup) > available) {
       pages.push(page)
       page = []
-      usedHeight = 0
     }
     page.push(segment)
-    usedHeight += segment.estimatedHeight
   })
   if (page.length) pages.push(page)
-  return pages
+  return { autoScale, segments: measured, pages }
 }
 
-export function estimateOptimizedPageCount(report: NearDateReportProduct[], orientation: ReportOrientation, tuning: ReportTuning = DEFAULT_REPORT_TUNING): number {
-  const actualOrientation = resolveReportOrientation(report, orientation, 'optimized')
-  if (actualOrientation === 'portrait') {
-    const totalHeight = optimizedReportSegments(report,false,tuning).reduce((sum, segment) => sum + segment.estimatedHeight, 0)
-    return Math.max(1, Math.ceil(totalHeight / 560))
+async function resolveOptimizedLayout(report: NearDateReportProduct[], date: string, printMode: ReportPrintMode, tuning: ReportTuning, emphasis: ReportEmphasis, pageTarget: ReportPageTarget): Promise<OptimizedLayout> {
+  const pdfMake = await loadPdfMake()
+  const measure = (autoScale: number) => measureOptimizedLayout(pdfMake,report,date,printMode,tuning,emphasis,autoScale)
+  const natural = await measure(1)
+  if (natural.pages.length <= pageTarget) return natural
+  let best = await measure(MIN_AUTO_LAYOUT_SCALE)
+  if (best.pages.length > pageTarget) return best
+  // Largest scale that still reaches the page target, so text is only shrunk as much as needed.
+  let low = MIN_AUTO_LAYOUT_SCALE
+  let high = 1
+  while (high - low > 0.015) {
+    const middle = Math.round((low + high) * 50) / 100
+    const candidate = await measure(middle)
+    if (candidate.pages.length <= pageTarget) {
+      best = candidate
+      low = middle
+    } else high = middle
   }
-  const portraitEstimate = optimizedReportSegments(report,false,tuning).reduce((sum, segment) => sum + segment.estimatedHeight, 0)
-  if (portraitEstimate > 2_000) {
-    const denseHeight = reportSegments(report, true).reduce((sum, { item, lots }) => {
-      const productLines = 1
-        + Math.ceil((item.vietnameseName || item.productName || 'Chưa bổ sung tên').length / 30)
-        + Math.ceil((4 + item.packaging.length) / 33)
-      const noteLines = item.saleNote ? Math.ceil(item.saleNote.length / 52) : 1
-      return sum + Math.max(lots.length * 7.5, productLines * 6.8 + 2, noteLines * 6.8 + 2)
-    }, 0)
-    return Math.max(1, Math.ceil(denseHeight / 1_000))
+  return best
+}
+
+const optimizedLayoutCache = new Map<string, Promise<OptimizedLayout>>()
+
+function cachedOptimizedLayout(report: NearDateReportProduct[], date: string, printMode: ReportPrintMode, tuning: ReportTuning, emphasis: ReportEmphasis, pageTarget: ReportPageTarget) {
+  const key = JSON.stringify([report, date, printMode, tuning, [...emphasis].sort(), pageTarget])
+  let layout = optimizedLayoutCache.get(key)
+  if (!layout) {
+    layout = resolveOptimizedLayout(report,date,printMode,tuning,emphasis,pageTarget)
+    layout.catch(() => optimizedLayoutCache.delete(key))
+    optimizedLayoutCache.set(key, layout)
+    if (optimizedLayoutCache.size > 8) optimizedLayoutCache.delete(optimizedLayoutCache.keys().next().value!)
   }
-  const totalHeight = optimizedReportSegments(report,true,tuning).reduce((sum, segment) => sum + segment.estimatedHeight, 0)
-  return Math.max(1, Math.ceil(totalHeight / (515 * 2)))
+  return layout
+}
+
+export async function estimateOptimizedPageCount(report: NearDateReportProduct[], date: string, printMode: ReportPrintMode = 'monochrome', tuning: ReportTuning = DEFAULT_REPORT_TUNING, emphasis: ReportEmphasis = [], pageTarget: ReportPageTarget = 2): Promise<number> {
+  if (!report.length) return 1
+  return (await cachedOptimizedLayout(sortedReportByGroup(report),date,printMode,tuning,emphasis,pageTarget)).pages.length
 }
 
 export function prepareNearDateReport(rows: ComparedProduct[], products: Product[]): NearDateReportProduct[] {
-  return rows.flatMap((row) => {
+  const prepared = rows.flatMap((row) => {
     if (!row.current) return []
     const product = products.find((item) => item.id === row.productId)
     const grouped = new Map<string, NearDateReportLot>()
@@ -233,11 +330,13 @@ export function prepareNearDateReport(rows: ComparedProduct[], products: Product
       productName: row.productName,
       vietnameseName: row.vietnameseName,
       packaging: product ? packagingSummary(product) : 'Chưa bổ sung quy cách',
+      productGroup: product ? PRODUCT_GROUP_LABELS[product.productGroup] : 'Chưa phân nhóm',
       saleNote: row.current.saleNote?.trim() ?? '',
       isNewDate: row.current.isNewDate,
       lots,
     }]
   })
+  return sortedReportByGroup(prepared)
 }
 
 function triggerDownload(blob: Blob, filename: string) {
@@ -251,12 +350,13 @@ function triggerDownload(blob: Blob, filename: string) {
   window.setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
 
-export async function createNearDateWordBlob(report: NearDateReportProduct[], date: string, orientation: ReportOrientation = 'auto', printMode: ReportPrintMode = 'monochrome', layoutMode: ReportLayoutMode = 'optimized', tuning: ReportTuning = DEFAULT_REPORT_TUNING, emphasis: ReportEmphasis = []) {
+export async function createNearDateWordBlob(report: NearDateReportProduct[], date: string, orientation: ReportOrientation = 'auto', printMode: ReportPrintMode = 'monochrome', layoutMode: ReportLayoutMode = 'optimized', tuning: ReportTuning = DEFAULT_REPORT_TUNING, emphasis: ReportEmphasis = [], pageTarget: ReportPageTarget = 2) {
   const {
     AlignmentType,
     BorderStyle,
     Document,
     Footer,
+    Header,
     HeightRule,
     PageNumber,
     PageOrientation,
@@ -272,6 +372,7 @@ export async function createNearDateWordBlob(report: NearDateReportProduct[], da
     WidthType,
   } = await import('docx')
 
+  report = sortedReportByGroup(report)
   const monochrome = printMode === 'monochrome'
   const actualOrientation = resolveReportOrientation(report, orientation, layoutMode)
   const border = { style: BorderStyle.SINGLE, size: monochrome ? 8 : 4, color: monochrome ? '000000' : BORDER }
@@ -291,11 +392,24 @@ export async function createNearDateWordBlob(report: NearDateReportProduct[], da
     shading: options.fill ? { type: ShadingType.CLEAR, fill: options.fill } : undefined,
     borders: options.borders,
   })
+  // Word ignores "\n" inside a run, so each line of a Sale note becomes its own run after a break.
+  const textRuns = (text: string, options: { bold?: boolean; color?: string; size: number }) => text.split('\n').map((line, index) => new TextRun({ text: line, bold: options.bold, color: options.color, size: options.size, font: 'Arial', break: index ? 1 : undefined }))
   const textParagraph = (text: string, options: { bold?: boolean; color?: string; size?: number; align?: typeof AlignmentType[keyof typeof AlignmentType]; keepNext?: boolean } = {}) => new Paragraph({
     alignment: options.align,
     keepNext: options.keepNext,
     spacing: { before: 0, after: 0, line: 276 },
-    children: [new TextRun({ text, bold: options.bold, color: options.color, size: options.size ?? 20, font: 'Arial' })],
+    children: textRuns(text, { bold: options.bold, color: options.color, size: options.size ?? 20 }),
+  })
+  const quantityParagraph = (value: number | null, options: { size: number; align?: typeof AlignmentType[keyof typeof AlignmentType]; keepNext?: boolean; line?: number }) => new Paragraph({
+    alignment: options.align,
+    keepNext: options.keepNext,
+    spacing: { before:0, after:0, line:options.line ?? 276 },
+    children: value === null
+      ? [new TextRun({ text:'—', size:options.size, font:'Arial' })]
+      : [
+        new TextRun({ text:numberText(value), size:options.size, font:'Arial' }),
+        new TextRun({ text:' g', size:Math.round(options.size*0.8), color:MUTED, font:'Arial' }),
+      ],
   })
 
   const children: (InstanceType<typeof Paragraph> | InstanceType<typeof Table>)[] = layoutMode === 'optimized' ? [] : [
@@ -315,126 +429,91 @@ export async function createNearDateWordBlob(report: NearDateReportProduct[], da
     children.push(new Paragraph({ alignment: AlignmentType.CENTER, spacing: { before: 300 }, children: [new TextRun({ text: 'Không có dữ liệu phù hợp để xuất.', color: MUTED, size: 24, font: 'Arial' })] }))
   }
 
+  let optimizedHeader: InstanceType<typeof Header> | undefined
   if (layoutMode === 'optimized' && report.length) {
-    const tuningFactors = reportTuningFactors(tuning)
-    const narrow = actualOrientation === 'landscape'
-    const portraitEstimate = reportSegments(report, false).reduce((sum, segment) => sum + segment.estimatedHeight, 0)
-    const denseLandscape = narrow && portraitEstimate > 2_000
-    const optimizedWidths = denseLandscape
-      ? [1900, 600, 1000, 750, 550, 3300]
-      : narrow ? [1700, 700, 1100, 900, 700, 3000] : [2800, 1000, 1500, 1200, 900, 4052]
+    const layout = await cachedOptimizedLayout(report,date,printMode,tuning,emphasis,pageTarget)
+    const { density } = reportTuningFactors(tuning)
+    const effectiveDensity = density*layout.autoScale
+    const lineHeight = Math.min(1.45, Math.max(1, 1.18*density*(0.5+layout.autoScale/2)))
+    const optimizedLine = Math.round(240*lineHeight/1.18)
+    const optimizedFontSize = (size: number) => Math.round(tunedFontSize(size,tuning)*layout.autoScale*10)/10
+    // Same column widths as the PDF (points × 20), so notes wrap the same way in both files.
+    const optimizedWidths = [2640, 920, 1320, 1040, 800, 3680, 1100]
     const optimizedTotal = optimizedWidths.reduce((sum, width) => sum + width, 0)
-    const optimizedMargins = denseLandscape
-      ? { top: Math.round(12*tuningFactors.density), bottom: Math.round(12*tuningFactors.density), left: 24, right: 24 }
-      : { top: Math.round(28*tuningFactors.density), bottom: Math.round(28*tuningFactors.density), left: 45, right: 45 }
-    const optimizedParagraph = (text: string, options: { bold?: boolean; color?: string; size?: number; align?: typeof AlignmentType[keyof typeof AlignmentType] } = {}) => new Paragraph({
+    const optimizedMargins = { top: Math.round(28*effectiveDensity), bottom: Math.round(28*effectiveDensity), left: 45, right: 45 }
+    const optimizedParagraph = (text: string, options: { bold?: boolean; color?: string; size?: number; align?: typeof AlignmentType[keyof typeof AlignmentType]; keepNext?: boolean } = {}) => new Paragraph({
       alignment: options.align,
-      spacing: { before: 0, after: 0, line: Math.round(240*tuningFactors.density) },
-      children: [new TextRun({ text, bold: options.bold, color: options.color, size: tunedFontSize(options.size ?? 14,tuning), font: 'Arial' })],
+      keepNext: options.keepNext,
+      spacing: { before: 0, after: 0, line: optimizedLine },
+      children: textRuns(text, { bold: options.bold, color: options.color, size: optimizedFontSize(options.size ?? 14) }),
     })
-    const optimizedPageTitle = () => new Paragraph({
+    optimizedHeader = new Header({ children: [new Paragraph({
       alignment: AlignmentType.CENTER,
-      spacing: { before: 0, after: 45 },
-      children: [new TextRun({
-        text: `DANH SÁCH HÀNG CẬN DATE  •  ${formatDate(date)}  •  ${report.length} mã  •  ${report.reduce((sum, item) => sum + item.lots.length, 0)} dòng NSX`,
-        bold: true,
-        color: monochrome ? '000000' : BRAND,
-        size: tunedFontSize(15,tuning),
-        font: 'Arial',
-      })],
-    })
+      spacing: { before: 0, after: 0 },
+      children: [new TextRun({ text: optimizedTitleText(report,date), bold: true, color: monochrome ? '000000' : BRAND, size: optimizedFontSize(15), font: 'Arial' })],
+    })] })
     const productBorder = { style: BorderStyle.SINGLE, size: monochrome ? 12 : 7, color: monochrome ? '000000' : BRAND }
-    const buildPanelTable = (segments: ReportSegment[]) => {
-      const rows: InstanceType<typeof TableRow>[] = [new TableRow({
-        cantSplit: true,
-        tableHeader: true,
-        children: ['TÊN SẢN PHẨM', 'MỚI?', 'NSX', 'SL', '%', 'GHI CHÚ SALE'].map((label, index) => cell([
-          optimizedParagraph(label, { bold: true, color: monochrome ? '000000' : BRAND, size: denseLandscape ? 12 : narrow ? 12 : 14, align: AlignmentType.CENTER }),
-        ], optimizedWidths[index], { fill: monochrome ? 'E7E7E7' : BRAND_LIGHT, margins: optimizedMargins })),
-      })]
-      segments.forEach(({ item, lots, continued, estimatedHeight }) => {
-        const denseProductLines = 1
-          + Math.ceil((item.vietnameseName || item.productName || 'Chưa bổ sung tên').length / 30)
-          + Math.ceil((4 + item.packaging.length) / 33)
-        const denseNoteLines = item.saleNote ? Math.ceil(item.saleNote.length / 48) : 1
-        const denseGroupHeight = Math.max(lots.length * 180, denseProductLines * 170 + 48, denseNoteLines * 170 + 48)
-        const rowHeight = denseLandscape
-          ? Math.ceil(denseGroupHeight / lots.length)
-          : Math.ceil(estimatedHeight * 20 / lots.length)
-        lots.forEach((lot, lotIndex) => {
-          const first = lotIndex === 0
-          const last = lotIndex === lots.length - 1
-          const rowBorder = { top: first ? productBorder : border, bottom: last ? productBorder : border, left: border, right: border, insideHorizontal: border, insideVertical: border }
-          const rowCells: InstanceType<typeof TableCell>[] = []
-          if (first) rowCells.push(cell([
-            optimizedParagraph(`${item.vietnameseName || item.productName || 'Chưa bổ sung tên'}${continued ? ' (tiếp)' : ''}`, { bold: emphasized(emphasis,item,'productCode')||emphasized(emphasis,item,'productName'), color: monochrome ? '000000' : BRAND, size: denseLandscape ? 13 : narrow ? 15 : 18 }),
-          ], optimizedWidths[0], { rowSpan: lots.length, verticalAlign: VerticalAlign.TOP, borders: rowBorder, margins: optimizedMargins }))
-          if (first) rowCells.push(cell([
-            optimizedParagraph(item.isNewDate ? 'CÓ' : 'KHÔNG', { bold: true, color: monochrome ? '000000' : BRAND, size: denseLandscape ? 11 : narrow ? 12 : 13, align: AlignmentType.CENTER }),
-          ], optimizedWidths[1], { rowSpan: lots.length, borders: rowBorder, margins: optimizedMargins }))
-          rowCells.push(
-            cell([optimizedParagraph(lot.productionDate ? formatDate(lot.productionDate) : '—', { bold: emphasized(emphasis,item,'productionDate',lot), size: denseLandscape ? 11 : narrow ? 12 : 14, align: AlignmentType.CENTER })], optimizedWidths[2], { borders: rowBorder, margins: optimizedMargins }),
-            cell([optimizedParagraph(numberText(lot.quantityPacks), { size: denseLandscape ? 12 : narrow ? 13 : 15, align: AlignmentType.CENTER })], optimizedWidths[3], { borders: rowBorder, margins: optimizedMargins }),
-            cell([optimizedParagraph(lot.productionDate ? `${lot.datePercent}%` : '—', { bold: emphasized(emphasis,item,'datePercent',lot), color: monochrome ? '000000' : BRAND, size: denseLandscape ? 13 : narrow ? 15 : 17, align: AlignmentType.CENTER })], optimizedWidths[4], { borders: rowBorder, margins: optimizedMargins }),
-          )
-          if (first) rowCells.push(cell(item.saleNote ? [
-            optimizedParagraph(item.saleNote, { bold: emphasized(emphasis,item,'saleNote'), color: monochrome ? '000000' : '422006', size: denseLandscape ? 12 : narrow ? 13 : 15 }),
-          ] : [optimizedParagraph('', { size: 10 })], optimizedWidths[5], {
-            rowSpan: lots.length,
-            verticalAlign: item.saleNote ? VerticalAlign.TOP : VerticalAlign.CENTER,
-            fill: item.saleNote && !monochrome ? NOTE_FILL : 'FFFFFF',
-            borders: rowBorder,
-            margins: optimizedMargins,
-          }))
-          rows.push(new TableRow({ cantSplit: true, height: { value: rowHeight, rule: HeightRule.ATLEAST }, children: rowCells }))
-        })
-      })
-      return new Table({ width: { size: optimizedTotal, type: WidthType.DXA }, columnWidths: optimizedWidths, layout: TableLayoutType.FIXED, borders, rows })
-    }
-    const tunedSegments = optimizedReportSegments(report,narrow,tuning)
-    const panels = denseLandscape
-      ? balanceReportSegments(tunedSegments, 4)
-      : narrow
-        ? paginateReportSegments(tunedSegments, actualOrientation)
-        : paginateOptimizedPortrait(tunedSegments)
-    if (actualOrientation === 'landscape') {
-      const panelWidth = optimizedTotal
-      const gap = 184
-      for (let index = 0; index < panels.length; index += 2) {
-        if (index > 0) children.push(new Paragraph({ pageBreakBefore: true, spacing: { before: 0, after: 0 }, children: [] }))
-        children.push(optimizedPageTitle())
-        const noBorder = { style: BorderStyle.NONE, size: 0, color: 'FFFFFF' }
-        children.push(new Table({
-          width: { size: panelWidth * 2 + gap, type: WidthType.DXA },
-          columnWidths: [panelWidth, gap, panelWidth],
-          layout: TableLayoutType.FIXED,
-          borders: { top: noBorder, bottom: noBorder, left: noBorder, right: noBorder, insideHorizontal: noBorder, insideVertical: noBorder },
-          rows: [new TableRow({ cantSplit: true, children: [
-            new TableCell({ width: { size: panelWidth, type: WidthType.DXA }, margins: { top: 0, bottom: 0, left: 0, right: 0 }, borders: { top: noBorder, bottom: noBorder, left: noBorder, right: noBorder }, children: [buildPanelTable(panels[index])] }),
-            new TableCell({ width: { size: gap, type: WidthType.DXA }, margins: { top: 0, bottom: 0, left: 0, right: 0 }, borders: { top: noBorder, bottom: noBorder, left: noBorder, right: noBorder }, children: [new Paragraph('')] }),
-            new TableCell({ width: { size: panelWidth, type: WidthType.DXA }, margins: { top: 0, bottom: 0, left: 0, right: 0 }, borders: { top: noBorder, bottom: noBorder, left: noBorder, right: noBorder }, children: panels[index + 1] ? [buildPanelTable(panels[index + 1])] : [new Paragraph('')] }),
-          ] })],
+    const segments = layout.segments
+    const groupSpans = groupRowSpans(segments)
+    // One continuous table: Word repeats the header row and fills every page itself,
+    // while keepNext holds the rows of one product together.
+    const rows: InstanceType<typeof TableRow>[] = [new TableRow({
+      cantSplit: true,
+      tableHeader: true,
+      children: ['TÊN SẢN PHẨM', 'MỚI?', 'NSX', 'SL (GÓI)', '%', 'GHI CHÚ SALE', 'NHÓM'].map((label, index) => cell([
+        optimizedParagraph(label, { bold: true, color: monochrome ? '000000' : BRAND, size: 14, align: AlignmentType.CENTER }),
+      ], optimizedWidths[index], { fill: monochrome ? 'E7E7E7' : BRAND_LIGHT, margins: optimizedMargins })),
+    })]
+    segments.forEach(({ item, lots, continued, lotRowHeight }, segmentIndex) => {
+      const rowHeight = Math.ceil((lotRowHeight ?? 12) * 20)
+      lots.forEach((lot, lotIndex) => {
+        const first = lotIndex === 0
+        const last = lotIndex === lots.length - 1
+        const keepNext = !last
+        const rowBorder = { top: first ? productBorder : border, bottom: last ? productBorder : border, left: border, right: border, insideHorizontal: border, insideVertical: border }
+        const rowCells: InstanceType<typeof TableCell>[] = []
+        if (first) rowCells.push(cell([
+          optimizedParagraph(`${item.vietnameseName || item.productName || 'Chưa bổ sung tên'}${continued ? ' (tiếp)' : ''}`, { bold: emphasized(emphasis,item,'productCode')||emphasized(emphasis,item,'productName'), color: monochrome ? '000000' : BRAND, size: 18, keepNext }),
+        ], optimizedWidths[0], { rowSpan: lots.length, verticalAlign: VerticalAlign.TOP, borders: rowBorder, margins: optimizedMargins }))
+        if (first) rowCells.push(cell([
+          optimizedParagraph(item.isNewDate ? 'CÓ' : 'KHÔNG', { bold: true, color: monochrome ? '000000' : BRAND, size: 13, align: AlignmentType.CENTER, keepNext }),
+        ], optimizedWidths[1], { rowSpan: lots.length, borders: rowBorder, margins: optimizedMargins }))
+        rowCells.push(
+          cell([optimizedParagraph(lot.productionDate ? formatDate(lot.productionDate) : '—', { bold: emphasized(emphasis,item,'productionDate',lot), size: 14, align: AlignmentType.CENTER, keepNext })], optimizedWidths[2], { borders: rowBorder, margins: optimizedMargins }),
+          cell([quantityParagraph(lot.quantityPacks, { size:optimizedFontSize(15), align:AlignmentType.CENTER, keepNext, line:optimizedLine })], optimizedWidths[3], { borders: rowBorder, margins: optimizedMargins }),
+          cell([optimizedParagraph(lot.productionDate ? `${lot.datePercent}%` : '—', { bold: emphasized(emphasis,item,'datePercent',lot), color: monochrome ? '000000' : BRAND, size: 17, align: AlignmentType.CENTER, keepNext })], optimizedWidths[4], { borders: rowBorder, margins: optimizedMargins }),
+        )
+        if (first) rowCells.push(cell([
+          optimizedParagraph(item.saleNote, { bold: emphasized(emphasis,item,'saleNote'), color: monochrome ? '000000' : '422006', size: item.saleNote ? 15 : 10, keepNext }),
+        ], optimizedWidths[5], {
+          rowSpan: lots.length,
+          verticalAlign: item.saleNote ? VerticalAlign.TOP : VerticalAlign.CENTER,
+          fill: item.saleNote && !monochrome ? NOTE_FILL : 'FFFFFF',
+          borders: rowBorder,
+          margins: optimizedMargins,
         }))
-      }
-    } else panels.forEach((panel, index) => {
-      if (index > 0) children.push(new Paragraph({ pageBreakBefore: true, spacing: { before: 0, after: 0 }, children: [] }))
-      children.push(optimizedPageTitle())
-      children.push(buildPanelTable(panel))
+        const groupSpan = groupSpans.get(segmentIndex)
+        if (first && groupSpan) rowCells.push(cell([
+          optimizedParagraph(item.productGroup, { bold: true, size: 12, align: AlignmentType.CENTER }),
+        ], optimizedWidths[6], { rowSpan: groupSpan, borders: rowBorder, margins: optimizedMargins }))
+        rows.push(new TableRow({ cantSplit: true, height: { value: rowHeight, rule: HeightRule.ATLEAST }, children: rowCells }))
+      })
     })
+    children.push(new Table({ width: { size: optimizedTotal, type: WidthType.DXA }, columnWidths: optimizedWidths, layout: TableLayoutType.FIXED, borders, rows }))
   } else if (layoutMode === 'compact' && report.length) {
-    const compactWidths = actualOrientation === 'landscape' ? [3400, 1300, 2000, 1600, 1200, 5800] : [2500, 1000, 1500, 1250, 900, 3310]
+    const compactWidths = actualOrientation === 'landscape' ? [3400, 1300, 2000, 1600, 1200, 4600, 1200] : [2500, 1000, 1500, 1250, 900, 2310, 1000]
     const compactTotal = compactWidths.reduce((sum, width) => sum + width, 0)
     const compactMargins = { top: 55, bottom: 55, left: 85, right: 85 }
     const compactParagraph = (text: string, options: { bold?: boolean; color?: string; size?: number; align?: typeof AlignmentType[keyof typeof AlignmentType] } = {}) => new Paragraph({
       alignment: options.align,
       spacing: { before: 0, after: 0, line: 220 },
-      children: [new TextRun({ text, bold: options.bold, color: options.color, size: options.size ?? 17, font: 'Arial' })],
+      children: textRuns(text, { bold: options.bold, color: options.color, size: options.size ?? 17 }),
     })
     const productBorder = { style: BorderStyle.SINGLE, size: monochrome ? 14 : 8, color: monochrome ? '000000' : BRAND }
     const compactRows: InstanceType<typeof TableRow>[] = [new TableRow({
       cantSplit: true,
       tableHeader: true,
-      children: ['MÃ / TÊN SẢN PHẨM', 'CÓ MỚI?', 'NSX', 'SL (GÓI)', '% DATE', 'GHI CHÚ SALE'].map((label, index) => cell([
+      children: ['MÃ / TÊN SẢN PHẨM', 'CÓ MỚI?', 'NSX', 'SL (GÓI)', '% DATE', 'GHI CHÚ SALE', 'NHÓM'].map((label, index) => cell([
         compactParagraph(label, { bold: true, color: monochrome ? '000000' : BRAND, size: 17, align: AlignmentType.CENTER }),
       ], compactWidths[index], { fill: monochrome ? 'E7E7E7' : BRAND_LIGHT, margins: compactMargins })),
     })]
@@ -466,7 +545,7 @@ export async function createNearDateWordBlob(report: NearDateReportProduct[], da
         ], compactWidths[1], { rowSpan: lots.length, verticalAlign: VerticalAlign.CENTER, borders: rowBorder, margins: compactMargins }))
         rowCells.push(
           cell([compactParagraph(lot.productionDate ? formatDate(lot.productionDate) : '—', { bold: emphasized(emphasis,item,'productionDate',lot), size: 18, align: AlignmentType.CENTER })], compactWidths[2], { borders: rowBorder, margins: compactMargins }),
-          cell([compactParagraph(numberText(lot.quantityPacks), { size: 19, align: AlignmentType.CENTER })], compactWidths[3], { borders: rowBorder, margins: compactMargins }),
+          cell([quantityParagraph(lot.quantityPacks, { size:19, align:AlignmentType.CENTER, line:220 })], compactWidths[3], { borders: rowBorder, margins: compactMargins }),
           cell([compactParagraph(lot.productionDate ? `${lot.datePercent}%` : '—', { bold: emphasized(emphasis,item,'datePercent',lot), color: monochrome ? '000000' : BRAND, size: 22, align: AlignmentType.CENTER })], compactWidths[4], { borders: rowBorder, margins: compactMargins }),
         )
         if (first) {
@@ -479,6 +558,10 @@ export async function createNearDateWordBlob(report: NearDateReportProduct[], da
             margins: compactMargins,
           }))
         } else rowCells.push(cell([compactParagraph('')], compactWidths[5], { borders: rowBorder, margins: compactMargins }))
+        if (first) rowCells.push(cell([
+          compactParagraph(item.productGroup, { bold: true, size: 14, align: AlignmentType.CENTER }),
+        ], compactWidths[6], { rowSpan: lots.length, borders: rowBorder, margins: compactMargins }))
+        else rowCells.push(cell([compactParagraph('')], compactWidths[6], { borders: rowBorder, margins: compactMargins }))
         compactRows.push(new TableRow({ cantSplit: true, keepNext: !last && lots.length <= 8, children: rowCells }))
       })
     })
@@ -494,6 +577,7 @@ export async function createNearDateWordBlob(report: NearDateReportProduct[], da
       item.productName || 'Chưa bổ sung tên sản phẩm',
       item.vietnameseName || 'Chưa bổ sung tên tiếng Việt',
       `Quy cách: ${item.packaging}`,
+      `Nhóm: ${item.productGroup}`,
     ]
     const rows = [
       new TableRow({
@@ -526,7 +610,7 @@ export async function createNearDateWordBlob(report: NearDateReportProduct[], da
         cantSplit: true,
         children: [
           cell([textParagraph(formatDate(lot.productionDate), { bold: emphasized(emphasis,item,'productionDate',lot), size: monochrome ? 24 : 23, align: AlignmentType.CENTER, keepNext: lotIndex < item.lots.length - 1 })], codeWidth, { fill: monochrome ? 'FFFFFF' : lotIndex % 2 ? 'F8FAFC' : 'FFFFFF' }),
-          cell([textParagraph(numberText(lot.quantityPacks), { size: monochrome ? 25 : 23, align: AlignmentType.CENTER, keepNext: lotIndex < item.lots.length - 1 })], detailWidth, { fill: monochrome ? 'FFFFFF' : lotIndex % 2 ? 'F8FAFC' : 'FFFFFF' }),
+          cell([quantityParagraph(lot.quantityPacks, { size:monochrome ? 25 : 23, align:AlignmentType.CENTER, keepNext:lotIndex < item.lots.length - 1 })], detailWidth, { fill: monochrome ? 'FFFFFF' : lotIndex % 2 ? 'F8FAFC' : 'FFFFFF' }),
           cell([textParagraph(`${lot.datePercent}%`, { bold: emphasized(emphasis,item,'datePercent',lot), color: monochrome ? '000000' : BRAND, size: monochrome ? 29 : 25, align: AlignmentType.CENTER, keepNext: lotIndex < item.lots.length - 1 })], stateWidth, { fill: monochrome ? 'FFFFFF' : lotIndex % 2 ? 'F8FAFC' : 'FFFFFF' }),
         ],
       })),
@@ -543,18 +627,22 @@ export async function createNearDateWordBlob(report: NearDateReportProduct[], da
 
   const documentFile = new Document({
     creator: 'Chat Cận Date',
-    title: `Danh sách hàng cận date ${formatDate(date)}`,
-    styles: { default: { document: { run: { font: 'Arial', size: 20 }, paragraph: { spacing: { after: 80, line: 276 } } } } },
+    title: `Danh sách hàng cận date ${formatDate(date)}${layoutMode === 'optimized' ? ` - mục tiêu ${pageTarget} trang` : ''}`,
+    // docx fills the hidden cells under a merged cell with an empty default paragraph. In the
+    // optimized layout that paragraph must be tiny, or every lot row grows past the PDF height.
+    styles: { default: { document: layoutMode === 'optimized'
+      ? { run: { font: 'Arial', size: 2 }, paragraph: { spacing: { before: 0, after: 0, line: 240 } } }
+      : { run: { font: 'Arial', size: 20 }, paragraph: { spacing: { after: 80, line: 276 } } } } },
     sections: [{
       properties: {
         page: {
           size: { width: 11906, height: 16838, orientation: actualOrientation === 'landscape' ? PageOrientation.LANDSCAPE : PageOrientation.PORTRAIT },
           margin: layoutMode === 'optimized'
-            ? { top: 360, right: 227, bottom: 300, left: 227, header: 100, footer: 100 }
+            ? { top: 360, right: 200, bottom: 280, left: 200, header: 100, footer: 100 }
             : { top: 600, right: 720, bottom: 600, left: 720, header: 300, footer: 300 },
         },
       },
-      headers: undefined,
+      headers: optimizedHeader ? { default: optimizedHeader } : undefined,
       footers: { default: new Footer({ children: [new Paragraph({ alignment: AlignmentType.RIGHT, children: [new TextRun({ children: ['Trang ', PageNumber.CURRENT], color: MUTED, size: 17, font: 'Arial' })] })] }) },
       children,
     }],
@@ -562,16 +650,21 @@ export async function createNearDateWordBlob(report: NearDateReportProduct[], da
   return Packer.toBlob(documentFile)
 }
 
-function pdfCell(text: Content, options: Omit<Partial<ContentText & TableCellProperties>, 'text'> = {}): TableCell {
+function pdfCell(text: Content, options: Omit<Partial<ContentText & TableCellProperties>, 'text'> & { id?: string } = {}): TableCell {
   return { text, margin: [8, 7, 8, 7], ...options } as ContentText & TableCellProperties
 }
 
-export async function createNearDatePdfBlob(report: NearDateReportProduct[], date: string, orientation: ReportOrientation = 'auto', printMode: ReportPrintMode = 'monochrome', layoutMode: ReportLayoutMode = 'optimized', tuning: ReportTuning = DEFAULT_REPORT_TUNING, emphasis: ReportEmphasis = []) {
-  const [{ default: pdfMake }, { default: roboto }] = await Promise.all([
-    import('pdfmake/build/pdfmake'),
-    import('pdfmake/build/fonts/Roboto'),
-  ])
-  pdfMake.addFontContainer(roboto)
+function pdfQuantity(value: number | null, fontSize: number): Content {
+  if (value === null) return { text:'—', fontSize }
+  return [
+    { text:numberText(value), fontSize },
+    { text:' g', fontSize:Math.round(fontSize*0.8*10)/10, color:`#${MUTED}` },
+  ] as Content
+}
+
+export async function createNearDatePdfBlob(report: NearDateReportProduct[], date: string, orientation: ReportOrientation = 'auto', printMode: ReportPrintMode = 'monochrome', layoutMode: ReportLayoutMode = 'optimized', tuning: ReportTuning = DEFAULT_REPORT_TUNING, emphasis: ReportEmphasis = [], pageTarget: ReportPageTarget = 2) {
+  const pdfMake = await loadPdfMake()
+  report = sortedReportByGroup(report)
   const monochrome = printMode === 'monochrome'
   const actualOrientation = resolveReportOrientation(report, orientation, layoutMode)
 
@@ -581,7 +674,7 @@ export async function createNearDatePdfBlob(report: NearDateReportProduct[], dat
   ]
   if (!report.length) content.push({ text: 'Không có dữ liệu phù hợp để xuất.', alignment: 'center', color: `#${MUTED}`, margin: [0, 40, 0, 0] })
 
-  const compactPdfWidths: (number | string)[] = actualOrientation === 'landscape' ? [165, 70, 72, 62, 50, '*'] : [125, 55, 68, 55, 42, '*']
+  const compactPdfWidths: (number | string)[] = actualOrientation === 'landscape' ? [165, 70, 72, 62, 50, '*', 65] : [125, 55, 68, 55, 42, '*', 60]
   const compactHeaderRow = (): TableCell[] => [
     pdfCell('MÃ / TÊN SẢN PHẨM', { bold: true, color: monochrome ? '#000000' : `#${BRAND}`, fillColor: monochrome ? '#E7E7E7' : `#${BRAND_LIGHT}`, alignment: 'center', fontSize: 8 }),
     pdfCell('CÓ MỚI?', { bold: true, color: monochrome ? '#000000' : `#${BRAND}`, fillColor: monochrome ? '#E7E7E7' : `#${BRAND_LIGHT}`, alignment: 'center', fontSize: 8 }),
@@ -589,12 +682,13 @@ export async function createNearDatePdfBlob(report: NearDateReportProduct[], dat
     pdfCell('SL (GÓI)', { bold: true, color: monochrome ? '#000000' : `#${BRAND}`, fillColor: monochrome ? '#E7E7E7' : `#${BRAND_LIGHT}`, alignment: 'center', fontSize: 8 }),
     pdfCell('% DATE', { bold: true, color: monochrome ? '#000000' : `#${BRAND}`, fillColor: monochrome ? '#E7E7E7' : `#${BRAND_LIGHT}`, alignment: 'center', fontSize: 8 }),
     pdfCell('GHI CHÚ SALE', { bold: true, color: monochrome ? '#000000' : `#${BRAND}`, fillColor: monochrome ? '#E7E7E7' : `#${BRAND_LIGHT}`, alignment: 'center', fontSize: 8 }),
+    pdfCell('NHÓM', { bold: true, color: monochrome ? '#000000' : `#${BRAND}`, fillColor: monochrome ? '#E7E7E7' : `#${BRAND_LIGHT}`, alignment: 'center', fontSize: 8 }),
   ]
   const compactLayout = {
     hLineColor: () => monochrome ? '#000000' : `#${BORDER}`,
     vLineColor: () => monochrome ? '#000000' : `#${BORDER}`,
     hLineWidth: () => monochrome ? 1.1 : 0.7,
-    vLineWidth: (lineIndex: number) => monochrome ? (lineIndex === 0 || lineIndex === 6 ? 1.1 : 0.55) : 0.5,
+    vLineWidth: (lineIndex: number) => monochrome ? (lineIndex === 0 || lineIndex === 7 ? 1.1 : 0.55) : 0.5,
     paddingLeft: () => 0,
     paddingRight: () => 0,
     paddingTop: () => 0,
@@ -602,96 +696,40 @@ export async function createNearDatePdfBlob(report: NearDateReportProduct[], dat
   }
 
   if (layoutMode === 'optimized' && report.length) {
-    const tuningFactors = reportTuningFactors(tuning)
-    const optimizedFont = (size: number) => tunedFontSize(size,tuning)
-    const optimizedMargin = (margin: [number,number,number,number]): [number,number,number,number] => [margin[0],margin[1]*tuningFactors.density,margin[2],margin[3]*tuningFactors.density]
-    const narrow = actualOrientation === 'landscape'
-    const portraitEstimate = reportSegments(report, false).reduce((sum, segment) => sum + segment.estimatedHeight, 0)
-    const denseLandscape = narrow && portraitEstimate > 2_000
-    const optimizedWidths: (number | string)[] = denseLandscape ? [96, 30, 50, 36, 28, '*'] : narrow ? [84, 34, 52, 40, 32, '*'] : [132, 46, 66, 52, 40, '*']
-    const optimizedHeaderRow = (): TableCell[] => ['TÊN SẢN PHẨM', 'MỚI?', 'NSX', 'SL', '%', 'GHI CHÚ SALE'].map((label) => pdfCell(label, {
-      bold: true,
-      color: monochrome ? '#000000' : `#${BRAND}`,
-      fillColor: monochrome ? '#E7E7E7' : `#${BRAND_LIGHT}`,
-      alignment: 'center',
-      fontSize: optimizedFont(denseLandscape ? 5.8 : narrow ? 6.2 : 7),
-      margin: optimizedMargin(denseLandscape ? [1,1,1,1] : [2,2,2,2]),
-    }))
-    const optimizedLayout = {
-      hLineColor: () => monochrome ? '#000000' : `#${BORDER}`,
-      vLineColor: () => monochrome ? '#000000' : `#${BORDER}`,
-      hLineWidth: (lineIndex: number) => monochrome ? (lineIndex === 0 ? 1 : 0.55) : 0.45,
-      vLineWidth: (lineIndex: number) => monochrome ? (lineIndex === 0 || lineIndex === 6 ? 0.9 : 0.45) : 0.4,
-      paddingLeft: () => 0,
-      paddingRight: () => 0,
-      paddingTop: () => 0,
-      paddingBottom: () => 0,
-    }
-    const buildOptimizedSegment = ({ item, lots, continued }: ReportSegment): Content => {
-      const displayName = item.vietnameseName || item.productName || 'Chưa bổ sung tên'
-      const productLines = Math.max(1, Math.ceil((displayName.length + (continued ? 7 : 0)) / (narrow ? 20 : 30)))
-      const noteLines = item.saleNote ? Math.ceil(item.saleNote.length / (narrow ? 34 : 48)) : 1
-      const requiredHeight = Math.max(lots.length*(narrow?9:11),productLines*(narrow?8:10)+4,noteLines*(narrow?8.5:9.5)+5)*tuningFactors.density*tuningFactors.font
-      const rowHeight = Math.ceil(requiredHeight / lots.length)
-      const denseProductLines = 1
-        + Math.ceil((item.vietnameseName || item.productName || 'Chưa bổ sung tên').length / 30)
-        + Math.ceil((4 + item.packaging.length) / 33)
-      const denseNoteLines = item.saleNote ? Math.ceil(item.saleNote.length / 52) : 1
-      const denseRowHeight = Math.ceil(Math.max(lots.length*7.5,denseProductLines*6.8+2,denseNoteLines*6.8+2)*tuningFactors.density*tuningFactors.font/lots.length)
-      const body: TableCell[][] = lots.map((lot, lotIndex) => {
-        const first = lotIndex === 0
-        const row: TableCell[] = []
-        if (first) row.push(pdfCell([
-          { text: `${displayName}${continued ? ' (tiếp)' : ''}`, bold: emphasized(emphasis,item,'productCode')||emphasized(emphasis,item,'productName'), color: monochrome ? '#000000' : `#${BRAND}`, fontSize: optimizedFont(denseLandscape ? 6.6 : narrow ? 7.8 : 8.8) },
-        ], { rowSpan: lots.length, alignment: 'left', fillColor: '#FFFFFF', margin: optimizedMargin(denseLandscape ? [1.5,0.7,1.5,0.7] : [2.5,2,2.5,2]) }))
-        else row.push({})
-        if (first) row.push(pdfCell(item.isNewDate ? 'CÓ' : 'KHÔNG', { rowSpan: lots.length, bold: true, color: monochrome ? '#000000' : `#${BRAND}`, alignment: 'center', fontSize: optimizedFont(denseLandscape ? 5.7 : narrow ? 6.4 : 7), margin: optimizedMargin(denseLandscape ? [0.5,0.7,0.5,0.7] : [1,2,1,2]) }))
-        else row.push({})
-        row.push(
-          pdfCell(lot.productionDate ? formatDate(lot.productionDate) : '—', { bold: emphasized(emphasis,item,'productionDate',lot), alignment: 'center', fontSize: optimizedFont(denseLandscape ? 5.7 : narrow ? 6.6 : 7.5), margin: optimizedMargin(denseLandscape ? [0.5,0.7,0.5,0.7] : [1,2,1,2]) }),
-          pdfCell(numberText(lot.quantityPacks), { alignment: 'center', fontSize: optimizedFont(denseLandscape ? 5.9 : narrow ? 6.8 : 7.7), margin: optimizedMargin(denseLandscape ? [0.5,0.7,0.5,0.7] : [1,2,1,2]) }),
-          pdfCell(lot.productionDate ? `${lot.datePercent}%` : '—', { bold: emphasized(emphasis,item,'datePercent',lot), color: monochrome ? '#000000' : `#${BRAND}`, alignment: 'center', fontSize: optimizedFont(denseLandscape ? 6.4 : narrow ? 7.6 : 8.5), margin: optimizedMargin(denseLandscape ? [0.5,0.7,0.5,0.7] : [1,2,1,2]) }),
-        )
-        if (first) row.push(pdfCell(item.saleNote || '', {
-          rowSpan: lots.length,
-          bold: emphasized(emphasis,item,'saleNote'),
-          color: monochrome ? '#000000' : item.saleNote ? '#422006' : `#${MUTED}`,
-          alignment: item.saleNote ? 'left' : 'center',
-          fillColor: item.saleNote && !monochrome ? `#${NOTE_FILL}` : '#FFFFFF',
-          fontSize: optimizedFont(denseLandscape ? 5.8 : narrow ? 6.8 : 7.6),
-          margin: optimizedMargin(denseLandscape ? [1.5,0.7,1.5,0.7] : [2.5,2,2.5,2]),
-        }))
-        else row.push({})
-        return row
+    const layout = await cachedOptimizedLayout(report,date,printMode,tuning,emphasis,pageTarget)
+    const cells = optimizedPdfCells(printMode,tuning,layout.autoScale,emphasis)
+    const buildOptimizedPanel = (segments: ReportSegment[], previousGroup?: string): Content[] => {
+      const body: TableCell[][] = [cells.header()]
+      const rowHeights: number[] = []
+      segments.forEach(({item,lots,continued,lotRowHeight},segmentIndex)=>{
+        // pdfMake mis-sizes rows when several row-span cells need extra height at once, so the
+        // group column uses one plain cell per lot row with hidden inner borders to look merged.
+        const runStart = segmentIndex===0||segments[segmentIndex-1].item.productGroup!==item.productGroup
+        const runEnd = segmentIndex===segments.length-1||segments[segmentIndex+1].item.productGroup!==item.productGroup
+        const groupLabel = !runStart ? '' : segmentIndex===0&&previousGroup===item.productGroup ? continuedGroupLabel(item.productGroup) : item.productGroup
+        lots.forEach((lot,lotIndex)=>{
+          const first=lotIndex===0
+          body.push([
+            first?cells.name(item,continued,lots.length):{},
+            first?cells.isNew(item,lots.length):{},
+            cells.productionDate(item,lot),
+            cells.quantity(lot),
+            cells.datePercent(item,lot),
+            first?cells.note(item,lots.length):{},
+            cells.group(first?groupLabel:'',1,[true,runStart&&first,true,runEnd&&lotIndex===lots.length-1]),
+          ])
+          rowHeights.push(lotRowHeight ?? 0)
+        })
       })
-      const table = { dontBreakRows: true, widths: optimizedWidths, heights: denseLandscape ? denseRowHeight : rowHeight, body }
-      return { table, layout: optimizedLayout, unbreakable: true, margin: [0, 0, 0, 0] }
+      return [
+        cells.title(optimizedTitleText(report,date)),
+        { table: { dontBreakRows:true, widths:cells.widths, heights:(rowIndex:number)=>rowIndex===0?'auto':rowHeights[rowIndex-1], body }, layout:cells.layout, margin:[0,0,0,0] } as Content,
+      ]
     }
-    const tunedSegments = optimizedReportSegments(report,narrow,tuning)
-    const panels = denseLandscape
-      ? balanceReportSegments(tunedSegments, 4)
-      : narrow
-        ? paginateReportSegments(tunedSegments, actualOrientation)
-        : paginateOptimizedPortrait(tunedSegments)
-    const panelStack = (segments: ReportSegment[]): Content[] => [
-      { text: `DANH SÁCH HÀNG CẬN DATE  •  ${formatDate(date)}  •  ${report.length} mã  •  ${report.reduce((sum, item) => sum + item.lots.length, 0)} dòng NSX`, bold: true, alignment: 'center', color: monochrome ? '#000000' : `#${BRAND}`, fontSize: optimizedFont(7.5), margin: [0,0,0,5] },
-      { table: { widths: optimizedWidths, body: [optimizedHeaderRow()] }, layout: optimizedLayout, margin: [0, 0, 0, 0] },
-      ...segments.map(buildOptimizedSegment),
-    ]
-    if (actualOrientation === 'landscape') {
-      for (let index = 0; index < panels.length; index += 2) {
-        if (index > 0) content.push({ text: '', pageBreak: 'before', margin: [0,0,0,0] })
-        content.push({
-          columns: [
-            { width: '*', stack: panelStack(panels[index]) },
-            { width: '*', stack: panels[index + 1] ? panelStack(panels[index + 1]) : [] },
-          ],
-          columnGap: 7,
-        } as Content)
-      }
-    } else panels.forEach((panel, index) => {
-      if (index > 0) content.push({ text: '', pageBreak: 'before', margin: [0,0,0,0] })
-      content.push({ stack: panelStack(panel) } as Content)
+    layout.pages.forEach((panel, index) => {
+      const previousGroup=index>0?layout.pages[index-1][layout.pages[index-1].length-1]?.item.productGroup:undefined
+      // The break sits on the panel itself: an empty text node would add a blank line on top.
+      content.push({ stack: buildOptimizedPanel(panel,previousGroup), pageBreak: index>0?'before':undefined } as Content)
     })
   } else if (layoutMode === 'compact' && report.length) {
     content.push({ table: { widths: compactPdfWidths, body: [compactHeaderRow()] }, layout: compactLayout, margin: [0, 0, 0, 0] })
@@ -701,7 +739,7 @@ export async function createNearDatePdfBlob(report: NearDateReportProduct[], dat
         const segment = lots.slice(offset, offset + 8)
         const continued = offset > 0
         const productCharsPerLine = actualOrientation === 'landscape' ? 34 : 25
-        const noteCharsPerLine = actualOrientation === 'landscape' ? 70 : 38
+        const noteCharsPerLine = actualOrientation === 'landscape' ? 55 : 28
         const productLineCount = 2
           + Math.ceil((item.vietnameseName || item.productName || '').length / productCharsPerLine)
           + Math.ceil((4 + item.packaging.length) / productCharsPerLine)
@@ -721,12 +759,14 @@ export async function createNearDatePdfBlob(report: NearDateReportProduct[], dat
           else row.push({})
           row.push(
             pdfCell(lot.productionDate ? formatDate(lot.productionDate) : '—', { bold: emphasized(emphasis,item,'productionDate',lot), alignment: 'center', fontSize: 9, margin: [4, 4, 4, 4] }),
-            pdfCell(numberText(lot.quantityPacks), { alignment: 'center', fontSize: 9.5, margin: [4, 4, 4, 4] }),
+            pdfCell(pdfQuantity(lot.quantityPacks,9.5), { alignment: 'center', margin: [4, 4, 4, 4] }),
             pdfCell(lot.productionDate ? `${lot.datePercent}%` : '—', { bold: emphasized(emphasis,item,'datePercent',lot), color: monochrome ? '#000000' : `#${BRAND}`, alignment: 'center', fontSize: 11, margin: [4, 4, 4, 4] }),
           )
           if (first) row.push(pdfCell(item.saleNote ? [
             { text: item.saleNote, bold: emphasized(emphasis,item,'saleNote'), color: monochrome ? '#000000' : '#422006', fontSize: 9 },
           ] : '—', { rowSpan: segment.length, alignment: item.saleNote ? 'left' : 'center', fillColor: item.saleNote && !monochrome ? `#${NOTE_FILL}` : '#FFFFFF', margin: [5, 4, 5, 4] }))
+          else row.push({})
+          if (first) row.push(pdfCell(item.productGroup, { rowSpan: segment.length, bold: true, alignment: 'center', fontSize: 7, margin: [2, 4, 2, 4] }))
           else row.push({})
           return row
         })
@@ -739,7 +779,7 @@ export async function createNearDatePdfBlob(report: NearDateReportProduct[], dat
       }
     })
   } else report.forEach((item) => {
-    const details = [item.productName || 'Chưa bổ sung tên sản phẩm', item.vietnameseName || 'Chưa bổ sung tên tiếng Việt', `Quy cách: ${item.packaging}`].join('\n')
+    const details = [item.productName || 'Chưa bổ sung tên sản phẩm', item.vietnameseName || 'Chưa bổ sung tên tiếng Việt', `Nhóm: ${item.productGroup}`, `Quy cách: ${item.packaging}`].join('\n')
     const body: TableCell[][] = [
       [
         pdfCell(`MÃ: ${item.productCode}`, { bold: emphasized(emphasis,item,'productCode'), color: monochrome ? '#000000' : '#FFFFFF', fillColor: monochrome ? '#FFFFFF' : `#${BRAND}`, fontSize: monochrome ? 13 : 12 }),
@@ -761,7 +801,7 @@ export async function createNearDatePdfBlob(report: NearDateReportProduct[], dat
       ],
       ...item.lots.map((lot, lotIndex): TableCell[] => [
         pdfCell(formatDate(lot.productionDate), { bold: emphasized(emphasis,item,'productionDate',lot), alignment: 'center', fillColor: monochrome ? '#FFFFFF' : lotIndex % 2 ? '#F8FAFC' : '#FFFFFF', fontSize: monochrome ? 12 : 11 }),
-        pdfCell(numberText(lot.quantityPacks), { alignment: 'center', fillColor: monochrome ? '#FFFFFF' : lotIndex % 2 ? '#F8FAFC' : '#FFFFFF', fontSize: monochrome ? 12 : 11 }),
+        pdfCell(pdfQuantity(lot.quantityPacks,monochrome ? 12 : 11), { alignment: 'center', fillColor: monochrome ? '#FFFFFF' : lotIndex % 2 ? '#F8FAFC' : '#FFFFFF' }),
         pdfCell(`${lot.datePercent}%`, { bold: emphasized(emphasis,item,'datePercent',lot), color: monochrome ? '#000000' : `#${BRAND}`, alignment: 'center', fillColor: monochrome ? '#FFFFFF' : lotIndex % 2 ? '#F8FAFC' : '#FFFFFF', fontSize: monochrome ? 14 : 12 }),
       ]),
     ]
@@ -782,10 +822,10 @@ export async function createNearDatePdfBlob(report: NearDateReportProduct[], dat
   })
 
   const definition: TDocumentDefinitions = {
-    info: { title: `Danh sách hàng cận date ${formatDate(date)}`, author: 'Chat Cận Date', subject: 'Báo cáo cận date dành cho thủ kho' },
+    info: { title: `Danh sách hàng cận date ${formatDate(date)}`, author: 'Chat Cận Date', subject: `Báo cáo cận date dành cho thủ kho${layoutMode === 'optimized' ? ` - mục tiêu ${pageTarget} trang` : ''}` },
     pageSize: 'A4',
     pageOrientation: actualOrientation,
-    pageMargins: layoutMode === 'optimized' ? [12, 12, 12, 16] : [28, 48, 28, 30],
+    pageMargins: layoutMode === 'optimized' ? OPTIMIZED_PAGE_MARGINS : [28, 48, 28, 30],
     defaultStyle: { font: 'Roboto', fontSize: 10, color: '#0F172A', lineHeight: 1.18 },
     styles: {
       title: { fontSize: 18, bold: true, color: monochrome ? '#000000' : `#${BRAND}`, alignment: 'center', margin: [0, 0, 0, 4] },
@@ -796,14 +836,14 @@ export async function createNearDatePdfBlob(report: NearDateReportProduct[], dat
       : layoutMode === 'compact' && currentPage > 1
       ? { table: { widths: compactPdfWidths, body: [compactHeaderRow()] }, layout: compactLayout, margin: [28, 16, 28, 0] }
       : { text: currentPage > 1 ? `CẬN DATE • ${formatDate(date)}` : '', alignment: 'right', color: `#${MUTED}`, fontSize: 8, margin: [0, 18, 28, 0] },
-    footer: (currentPage, pageCount) => ({ text: `Trang ${currentPage}/${pageCount}`, alignment: 'right', color: `#${MUTED}`, fontSize: layoutMode === 'optimized' ? 7 : 8, margin: [0, layoutMode === 'optimized' ? 2 : 6, layoutMode === 'optimized' ? 12 : 28, 0] }),
+    footer: (currentPage, pageCount) => ({ text: `Trang ${currentPage}/${pageCount}`, alignment: 'right', color: `#${MUTED}`, fontSize: layoutMode === 'optimized' ? 7 : 8, margin: [0, layoutMode === 'optimized' ? 2 : 6, layoutMode === 'optimized' ? 10 : 28, 0] }),
     content,
   }
   return pdfMake.createPdf(definition).getBlob()
 }
 
-export async function exportNearDateReport(rows: ComparedProduct[], date: string, type: 'docx' | 'pdf', products: Product[], orientation: ReportOrientation = 'auto', printMode: ReportPrintMode = 'monochrome', layoutMode: ReportLayoutMode = 'optimized', tuning: ReportTuning = DEFAULT_REPORT_TUNING, emphasis: ReportEmphasis = []) {
+export async function exportNearDateReport(rows: ComparedProduct[], date: string, type: 'docx' | 'pdf', products: Product[], orientation: ReportOrientation = 'auto', printMode: ReportPrintMode = 'monochrome', layoutMode: ReportLayoutMode = 'optimized', tuning: ReportTuning = DEFAULT_REPORT_TUNING, emphasis: ReportEmphasis = [], pageTarget: ReportPageTarget = 2) {
   const report = prepareNearDateReport(rows, products)
-  const blob = type === 'docx' ? await createNearDateWordBlob(report, date, orientation, printMode, layoutMode,tuning,emphasis) : await createNearDatePdfBlob(report, date, orientation, printMode, layoutMode,tuning,emphasis)
+  const blob = type === 'docx' ? await createNearDateWordBlob(report, date, orientation, printMode, layoutMode,tuning,emphasis,pageTarget) : await createNearDatePdfBlob(report, date, orientation, printMode, layoutMode,tuning,emphasis,pageTarget)
   triggerDownload(blob, `can-date-${fileDate(date)}.${type}`)
 }

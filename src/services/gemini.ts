@@ -1,5 +1,5 @@
-import { AIError, getAI, getGenerativeModel, GoogleAIBackend, Schema } from 'firebase/ai'
-import { firebaseApp } from '../lib/firebase'
+import { AIError, getAI, getGenerativeModel, GoogleAIBackend, Schema, ThinkingLevel } from 'firebase/ai'
+import { ensureAppCheckReady, firebaseApp } from '../lib/firebase'
 import type { NearDateReportProduct, ReportEmphasisSuggestion } from '../lib/reportExport'
 
 export const GEMINI_MODEL = 'gemini-3.8-flash'
@@ -27,11 +27,12 @@ const responseSchema = Schema.object({
   },
 })
 
+const REQUEST_TIMEOUT = 60_000
+const BATCH_SIZE = 20
+
 const ai = getAI(firebaseApp,{backend:new GoogleAIBackend()})
-const model = getGenerativeModel(ai,{
-  model:GEMINI_MODEL,
-  generationConfig:{temperature:0.15,maxOutputTokens:8192,responseMimeType:'application/json',responseSchema},
-  systemInstruction:`
+const generationConfig = {temperature:0.15,maxOutputTokens:8192,responseMimeType:'application/json',responseSchema}
+const systemInstruction = `
   Bạn là trợ lý phân tích bố cục báo cáo hàng cận date dành cho thủ kho.
 
 MỤC TIÊU:
@@ -52,7 +53,40 @@ GIỚI HẠN:
 ĐẦU RA:
 Chỉ trả về JSON hợp lệ theo cấu trúc được yêu cầu trong prompt phân tích. Không thêm Markdown, lời dẫn hoặc nội dung ngoài JSON.
 `
-})
+// Low thinking keeps answers fast and leaves the output budget for the JSON itself.
+const model = getGenerativeModel(ai,{model:GEMINI_MODEL,generationConfig:{...generationConfig,thinkingConfig:{thinkingLevel:ThinkingLevel.LOW}},systemInstruction},{timeout:REQUEST_TIMEOUT})
+// Used only when the model rejects the thinking setting.
+const fallbackModel = getGenerativeModel(ai,{model:GEMINI_MODEL,generationConfig,systemInstruction},{timeout:REQUEST_TIMEOUT})
+let thinkingSupported = true
+
+type DiagnosableError = Error & { status?: number; code?: string; splittable?: boolean }
+
+function errorStatus(error: unknown) {
+  const candidate=error as {status?:number;customErrorData?:{status?:number;httpStatus?:number}}
+  return candidate?.status??candidate?.customErrorData?.status??candidate?.customErrorData?.httpStatus
+}
+
+// The technical code is shown next to the Vietnamese message so a failure on the website can be diagnosed.
+function describedError(message:string,error:unknown,splittable=false) {
+  const status=errorStatus(error)
+  const code=(error as {code?:string})?.code
+  const detail=[code,status?`HTTP ${status}`:''].filter(Boolean).join(', ')
+  const described=new Error(detail?`${message} (${detail})`:message) as DiagnosableError
+  described.status=status
+  described.code=code
+  described.splittable=splittable
+  return described
+}
+
+function retryable(error:unknown) {
+  const status=errorStatus(error)
+  const code=(error as {code?:string})?.code
+  return status===429||status===500||status===502||status===503||status===504||code==='fetch-error'||code==='ai/fetch-error'
+}
+
+function wait(milliseconds:number) {
+  return new Promise((resolve)=>window.setTimeout(resolve,milliseconds))
+}
 
 function safeProducts(products: NearDateReportProduct[]) {
   if(!products.length)throw new Error('Không có dữ liệu để Gemini phân tích.')
@@ -66,7 +100,7 @@ function safeProducts(products: NearDateReportProduct[]) {
   }))
 }
 
-export async function analyzeReportEmphasis(products: NearDateReportProduct[]): Promise<{suggestions:ReportEmphasisSuggestion[];model:string}> {
+async function analyzeReportBatch(products: NearDateReportProduct[], appCheckProblem?: string): Promise<{suggestions:ReportEmphasisSuggestion[];model:string}> {
   const prompt=`NHIỆM VỤ:
 Phân tích dữ liệu báo cáo hàng cận date và chọn những trường thực sự cần in đậm để thủ kho dễ nhận biết thông tin quan trọng.
 
@@ -176,20 +210,69 @@ Quy định:
 DỮ LIỆU JSON:
 ${JSON.stringify(safeProducts(products))}
 `
+  let raw=''
   try {
-    const result=await model.generateContent(prompt)
-    const raw=result.response.text()
-    if(!raw.trim())return{suggestions:[],model:GEMINI_MODEL}
+    let result
+    try {
+      result=await (thinkingSupported?model:fallbackModel).generateContent(prompt)
+    } catch(error) {
+      if(!(thinkingSupported&&error instanceof AIError&&errorStatus(error)===400&&/thinking/i.test(error.message)))throw error
+      thinkingSupported=false
+      result=await fallbackModel.generateContent(prompt)
+    }
+    const finishReason=result.response.candidates?.[0]?.finishReason
+    if(finishReason==='MAX_TOKENS')throw describedError('Kết quả Gemini bị cắt vì quá dài.',{code:'max-tokens'},true)
+    raw=result.response.text()
+  } catch(error) {
+    if(error instanceof AIError) {
+      const status=errorStatus(error)
+      if(error.code==='api-not-enabled')throw describedError('Firebase AI Logic chưa được bật. Hãy chạy Get started trong Firebase Console và chọn Gemini Developer API.',error)
+      if(status===429)throw describedError('Gemini đang hết hạn mức hoặc quá tải. Hệ thống đã thử lại nhưng chưa thành công.',error)
+      if(status===401||status===403)throw describedError(`Firebase AI Logic từ chối yêu cầu từ trang này.${appCheckProblem?` ${appCheckProblem}`:' Hãy kiểm tra App Check (domain reCAPTCHA Enterprise) và giới hạn API key trong Google Cloud.'}`,error)
+      if(status===404)throw describedError(`Model ${GEMINI_MODEL} không khả dụng với Firebase AI Logic của dự án.`,error)
+      if(error.code==='fetch-error')throw describedError('Không thể kết nối Firebase AI Logic hoặc Gemini phản hồi quá thời gian cho phép.',error)
+      throw describedError(`Gemini báo lỗi: ${error.message}`,error)
+    }
+    throw error
+  }
+  if(!raw.trim())return{suggestions:[],model:GEMINI_MODEL}
+  try {
     const parsed=JSON.parse(raw) as {suggestions?:unknown}
     return {suggestions:Array.isArray(parsed.suggestions)?parsed.suggestions as ReportEmphasisSuggestion[]:[],model:GEMINI_MODEL}
   } catch(error) {
-    if(error instanceof AIError) {
-      if(error.code==='api-not-enabled')throw new Error('Firebase AI Logic chưa được bật. Hãy chạy Get started trong Firebase Console và chọn Gemini Developer API.')
-      if(error.customErrorData?.status===429)throw new Error('Gemini free tier đang hết hạn mức hoặc quá tải. Vui lòng thử lại sau.')
-      if(error.customErrorData?.status===403)throw new Error('Firebase AI Logic hoặc App Check chưa được cấu hình đúng cho website này.')
-      if(error.code==='fetch-error')throw new Error('Không thể kết nối Firebase AI Logic. Hãy kiểm tra mạng rồi thử lại.')
-    }
-    if(error instanceof SyntaxError)throw new Error('Gemini trả kết quả không đúng định dạng. Vui lòng phân tích lại.')
-    throw error
+    throw describedError('Gemini trả kết quả không đúng định dạng JSON.',error,true)
   }
+}
+
+// Runs one batch with retries; a cut-off or malformed answer is retried on two smaller halves.
+async function analyzeWithRetry(products: NearDateReportProduct[], appCheckProblem?: string): Promise<ReportEmphasisSuggestion[]> {
+  for(let attempt=0;;attempt+=1) {
+    try {
+      return (await analyzeReportBatch(products,appCheckProblem)).suggestions
+    } catch(error) {
+      if((error as DiagnosableError).splittable&&products.length>1) {
+        const middle=Math.ceil(products.length/2)
+        return [...await analyzeWithRetry(products.slice(0,middle),appCheckProblem),...await analyzeWithRetry(products.slice(middle),appCheckProblem)]
+      }
+      const canRetry=retryable(error)||(error as DiagnosableError).splittable
+      if(attempt>=2||!canRetry)throw error
+      await wait(1000*2**attempt)
+    }
+  }
+}
+
+export async function analyzeReportEmphasis(products: NearDateReportProduct[], onProgress?: (completed:number,total:number)=>void): Promise<{suggestions:ReportEmphasisSuggestion[];model:string}> {
+  if(!products.length)throw new Error('Không có dữ liệu để Gemini phân tích.')
+  if(products.length>200)throw new Error('Mỗi lần chỉ phân tích tối đa 200 mã.')
+  // App Check is only required when it is enforced in Firebase, so a missing token must not block
+  // the request; the reason is kept to explain a later 401/403 answer.
+  const appCheckProblem=await ensureAppCheckReady().then(()=>undefined,(error:unknown)=>error instanceof Error?error.message:String(error))
+  if(appCheckProblem)console.warn(appCheckProblem)
+  const batches=Array.from({length:Math.ceil(products.length/BATCH_SIZE)},(_,index)=>products.slice(index*BATCH_SIZE,(index+1)*BATCH_SIZE))
+  const suggestions:ReportEmphasisSuggestion[]=[]
+  for(let batchIndex=0;batchIndex<batches.length;batchIndex+=1) {
+    suggestions.push(...await analyzeWithRetry(batches[batchIndex],appCheckProblem))
+    onProgress?.(batchIndex+1,batches.length)
+  }
+  return {suggestions,model:GEMINI_MODEL}
 }

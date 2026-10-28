@@ -20,7 +20,16 @@ export function subscribeProducts(onData: (items: Product[]) => void, onError: (
 }
 
 export function subscribeRecords(onData: (items: DateRecord[]) => void, onError: (error: Error) => void): Unsubscribe {
-  return onSnapshot(collection(db, 'dateRecords'), (snapshot) => onData(snapshot.docs.map((item) => ({ id: item.id, ...item.data() }) as DateRecord)), onError)
+  let recordsById = new Map<string,DateRecord>()
+  return onSnapshot(collection(db, 'dateRecords'), (snapshot) => {
+    const next = new Map(recordsById)
+    snapshot.docChanges().forEach((change) => {
+      if (change.type === 'removed') next.delete(change.doc.id)
+      else next.set(change.doc.id, { id: change.doc.id, ...change.doc.data() } as DateRecord)
+    })
+    recordsById = next
+    onData([...recordsById.values()])
+  }, onError)
 }
 
 export async function saveProduct(product: Omit<Product, 'createdAt' | 'updatedAt'>): Promise<void> {

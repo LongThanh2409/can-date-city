@@ -1,9 +1,9 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
+import { lazy, Suspense, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
 import { Activity, ArrowDownAZ, Bell, ChevronDown, Cloud, Copy, Eye, FilterX, History, LogOut, Package, PackageOpen, Plus, RefreshCw, Search, Settings2, Sparkles, Trash2, TriangleAlert, Users } from 'lucide-react'
 import { compareRecords, comparisonStats } from './domain/compare'
 import { closestPreviousDate, formatDate, previousCalendarDay, todayVietnam } from './lib/date'
 import { subscribeProducts, subscribeRecords, deleteChatDate, enforceRetention, updateRecordPriorities } from './services/firestore'
-import type { DateRecord, Filters, Product, ProductGroup } from './types'
+import type { ComparedProduct, DateRecord, Filters, Product, ProductGroup } from './types'
 import { useAuth } from './hooks/useAuth'
 import { Login } from './components/Login'
 import { RecordDrawer } from './components/RecordDrawer'
@@ -40,30 +40,32 @@ function App() {
   const retentionChecked=useRef('')
   const toastTimer=useRef<number | undefined>(undefined)
   const [connection,setConnection]=useState<'connecting'|'online'|'error'>('connecting'), [toast,setToast]=useState<{message:string;error?:boolean}>()
-  const notify=(message:string,error=false)=>{window.clearTimeout(toastTimer.current);setToast({message,error});toastTimer.current=window.setTimeout(()=>setToast(undefined),3500)}
+  const notify=useCallback((message:string,error=false)=>{window.clearTimeout(toastTimer.current);setToast({message,error});toastTimer.current=window.setTimeout(()=>setToast(undefined),3500)},[])
   useEffect(()=>()=>window.clearTimeout(toastTimer.current),[])
-  useEffect(()=>{if(!allowed){setDataLoading(true);return};setDataLoading(true);setConnection('connecting');const a=subscribeProducts(setProducts,()=>{setConnection('error');notify('Mất kết nối danh mục.',true)});const b=subscribeRecords((items)=>{setRecords(items);setDataLoading(false);setConnection('online')},()=>{setDataLoading(false);setConnection('error');notify('Không thể đồng bộ dữ liệu.',true)});return()=>{a();b()}},[allowed])
+  useEffect(()=>{if(!allowed){setDataLoading(true);return};setDataLoading(true);setConnection('connecting');const a=subscribeProducts(setProducts,()=>{setConnection('error');notify('Mất kết nối danh mục.',true)});const b=subscribeRecords((items)=>{setRecords(items);setDataLoading(false);setConnection('online')},()=>{setDataLoading(false);setConnection('error');notify('Không thể đồng bộ dữ liệu.',true)});return()=>{a();b()}},[allowed,notify])
   const availableDates=useMemo(()=>[...new Set(records.map(r=>r.chatDate))].sort().reverse(),[records])
   const recentDates=useMemo(()=>availableDates.slice(0,5),[availableDates])
-  useEffect(()=>{if(!allowed||role!=='admin')return; const signature=availableDates.join('|');if(connection==='online'&&availableDates.length>5&&retentionChecked.current!==signature){retentionChecked.current=signature;void enforceRetention(records).catch(()=>notify('Không thể áp dụng chính sách lưu trữ tự động.',true))}},[availableDates,connection,records,role,allowed])
+  useEffect(()=>{if(!allowed||role!=='admin')return; const signature=availableDates.join('|');if(connection==='online'&&availableDates.length>5&&retentionChecked.current!==signature){retentionChecked.current=signature;void enforceRetention(records).catch(()=>notify('Không thể áp dụng chính sách lưu trữ tự động.',true))}},[availableDates,connection,records,role,allowed,notify])
   useEffect(()=>{if(role!=='sale'||!recentDates.length||recentDates.includes(chatDate))return;setChatDate(recentDates[0]);setManualCompare(false)},[role,recentDates,chatDate])
   useEffect(()=>{if(manualCompare)return; const yesterday=previousCalendarDay(chatDate); const chosen=availableDates.includes(yesterday)?yesterday:closestPreviousDate(chatDate,availableDates); setCompareDate(chosen??yesterday)},[chatDate,availableDates,manualCompare])
   const current=useMemo(()=>records.filter(r=>r.chatDate===chatDate),[records,chatDate]), previous=useMemo(()=>records.filter(r=>r.chatDate===compareDate),[records,compareDate])
   const compared=useMemo(()=>compareRecords(current,previous),[current,previous]), stats=useMemo(()=>comparisonStats(compared),[compared])
+  const productsById=useMemo(()=>new Map(products.map((product)=>[product.id,product])),[products])
+  const deferredFilters=useDeferredValue(filters)
   const previousOnlyCount=useMemo(()=>compared.filter((row)=>!row.current&&row.previous).length,[compared])
   const filtered=useMemo(()=>compared.filter(row=>{
     if(!row.current&&(role!=='admin'||!showPreviousOnly))return false
     const activeRecord=row.current??row.previous!
-    const product=products.find((item)=>item.id===row.productId)
-    const q=filters.query.toLowerCase(); if(q&&!`${row.productCode} ${row.productName} ${row.vietnameseName} ${product?PRODUCT_GROUP_LABELS[product.productGroup]:''} ${product?packagingSummary(product):''}`.toLowerCase().includes(q))return false
-    if(filters.productGroup!=='all'&&product?.productGroup!==filters.productGroup)return false
+    const product=productsById.get(row.productId)
+    const q=deferredFilters.query.toLowerCase(); if(q&&!`${row.productCode} ${row.productName} ${row.vietnameseName} ${product?PRODUCT_GROUP_LABELS[product.productGroup]:''} ${product?packagingSummary(product):''}`.toLowerCase().includes(q))return false
+    if(deferredFilters.productGroup!=='all'&&product?.productGroup!==deferredFilters.productGroup)return false
     const hasNote=Boolean(row.current?.saleNote?.trim())
-    if(filters.noteState==='noted'&&!hasNote)return false
-    if(filters.noteState==='not-noted'&&hasNote)return false
-    if(filters.newState==='new'&&!activeRecord.isNewDate)return false; if(filters.newState==='not-new'&&activeRecord.isNewDate)return false
-    if(filters.presence==='one-side'&&row.current&&row.previous)return false
-    if(filters.change!=='all'&&row.status!==filters.change&&!row.lots.some(l=>l.status===filters.change))return false
-    return row.lots.some(l=>{const lot=l.current??l.previous!; return (!filters.productionFrom||lot.productionDate>=filters.productionFrom)&&(!filters.productionTo||lot.productionDate<=filters.productionTo)&&(!filters.percentMin||lot.datePercent>=Number(filters.percentMin))&&(!filters.percentMax||lot.datePercent<=Number(filters.percentMax))})
+    if(deferredFilters.noteState==='noted'&&!hasNote)return false
+    if(deferredFilters.noteState==='not-noted'&&hasNote)return false
+    if(deferredFilters.newState==='new'&&!activeRecord.isNewDate)return false; if(deferredFilters.newState==='not-new'&&activeRecord.isNewDate)return false
+    if(deferredFilters.presence==='one-side'&&row.current&&row.previous)return false
+    if(deferredFilters.change!=='all'&&row.status!==deferredFilters.change&&!row.lots.some(l=>l.status===deferredFilters.change))return false
+    return row.lots.some(l=>{const lot=l.current??l.previous!; return (!deferredFilters.productionFrom||lot.productionDate>=deferredFilters.productionFrom)&&(!deferredFilters.productionTo||lot.productionDate<=deferredFilters.productionTo)&&(!deferredFilters.percentMin||lot.datePercent>=Number(deferredFilters.percentMin))&&(!deferredFilters.percentMax||lot.datePercent<=Number(deferredFilters.percentMax))})
   }).sort((a,b)=>{
     const direction=descending?-1:1
     if(sort==='priority'){
@@ -80,13 +82,14 @@ function App() {
     const left=sort==='name'?a.vietnameseName:sort==='status'?a.status:a.productCode
     const right=sort==='name'?b.vietnameseName:sort==='status'?b.status:b.productCode
     return left.localeCompare(right,'vi',{numeric:true})*direction
-  }),[compared,filters,sort,descending,products,role,showPreviousOnly])
+  }),[compared,deferredFilters,sort,descending,productsById,role,showPreviousOnly])
   const alertRows=useMemo(()=>current.filter((record)=>recordNeedsAttention(record,todayVietnam())),[current])
-  const pageSize=50, totalPages=Math.max(1,Math.ceil(filtered.length/pageSize)), actualPage=Math.min(page,totalPages), displayed=filtered.slice((actualPage-1)*pageSize,actualPage*pageSize)
+  const pageSize=100, totalPages=Math.max(1,Math.ceil(filtered.length/pageSize)), actualPage=Math.min(page,totalPages)
+  const displayed=useMemo(()=>filtered.slice((actualPage-1)*pageSize,actualPage*pageSize),[filtered,actualPage])
   const previousDayDate=previousCalendarDay(chatDate)
   const previousDayRecords=useMemo(()=>records.filter(r=>r.chatDate===previousDayDate),[records,previousDayDate])
   const selectedProduct=drawerProduct, selectedRecord=selectedProduct?current.find(r=>r.productId===selectedProduct.id):undefined, selectedPreviousDay=selectedProduct?previousDayRecords.find(r=>r.productId===selectedProduct.id):undefined
-  async function reorderRecords(sourceId: string, targetId: string) {
+  const reorderRecords=useCallback(async (sourceId: string, targetId: string) => {
     if(role!=='admin'||!user||reorderBusy||sourceId===targetId)return
     const ordered=[...current].sort((a,b)=>(a.priorityOrder??Number.MAX_SAFE_INTEGER)-(b.priorityOrder??Number.MAX_SAFE_INTEGER)||a.productCode.localeCompare(b.productCode,'vi',{numeric:true}))
     const sourceIndex=ordered.findIndex((record)=>record.id===sourceId), targetIndex=ordered.findIndex((record)=>record.id===targetId)
@@ -101,7 +104,8 @@ function App() {
     try { await updateRecordPriorities(updates,user.uid); notify('Đã lưu thứ tự ưu tiên các mã.') }
     catch { setRecords((items)=>items.map((record)=>previousOrders.has(record.id)?{...record,priorityOrder:previousOrders.get(record.id)}:record)); notify('Không thể lưu thứ tự ưu tiên.',true) }
     finally { setReorderBusy(false) }
-  }
+  },[role,user,reorderBusy,current,notify])
+  const addLot=useCallback((row: ComparedProduct)=>{const product=productsById.get(row.productId);if(product){setDrawerStartsWithNewLot(true);setDrawerProduct(product)}},[productsById])
   useEffect(()=>setPage(1),[chatDate])
   useEffect(()=>{if(role!=='admin')setShowPreviousOnly(false)},[role])
   if(loading)return <div className="grid min-h-screen place-items-center bg-canvas"><RefreshCw className="animate-spin text-brand-600"/></div>
@@ -140,7 +144,7 @@ function App() {
           <button className="btn-secondary" disabled={!filtered.length} onClick={()=>setReportOpen(true)}><Eye size={16}/>Xem trước &amp; xuất</button>
         </div>
         {role!=='sale'&&showFilters&&<div className="grid grid-cols-2 gap-3 border-b bg-slate-50 p-3 md:grid-cols-5"><div><label className="label">NSX từ</label><input className="input" type="date" value={filters.productionFrom} onChange={e=>{setFilters({...filters,productionFrom:e.target.value});setPage(1)}}/></div><div><label className="label">NSX đến</label><input className="input" type="date" value={filters.productionTo} onChange={e=>{setFilters({...filters,productionTo:e.target.value});setPage(1)}}/></div><div><label className="label">% date từ</label><input className="input" type="number" min="0" max="100" value={filters.percentMin} onChange={e=>{setFilters({...filters,percentMin:e.target.value});setPage(1)}}/></div><div><label className="label">% date đến</label><input className="input" type="number" min="0" max="100" value={filters.percentMax} onChange={e=>{setFilters({...filters,percentMax:e.target.value});setPage(1)}}/></div><div><label className="label">Phạm vi xuất hiện</label><select className="input" value={filters.presence} onChange={e=>{setFilters({...filters,presence:e.target.value as Filters['presence']});setPage(1)}}><option value="all">Cả hai / một ngày</option><option value="one-side">Chỉ một trong hai ngày</option></select></div></div>}
-        <div className="flex items-center justify-between border-b bg-white px-4 py-2 text-xs text-slate-500"><span>Hiển thị {displayed.length}/{filtered.length} mã phù hợp · luôn hiển thị đầy đủ các lô{role==='admin'&&showPreviousOnly&&previousOnlyCount>0?` · đang hiện ${previousOnlyCount} mã hôm qua có, hôm nay không`:''}{role==='admin'&&sort==='priority'?' · Kéo mã sản phẩm để đổi ưu tiên':''}</span><span>{role==='sale'?formatDate(chatDate):`${formatDate(chatDate)} ↔ ${formatDate(compareDate)}`}</span></div><ComparisonTable rows={displayed} products={products} userId={user.uid} role={role} reorderEnabled={role==='admin'&&sort==='priority'} reorderBusy={reorderBusy} onReorder={(sourceId,targetId)=>void reorderRecords(sourceId,targetId)} onAddLot={(row)=>{const product=products.find((item)=>item.id===row.productId);if(product){setDrawerStartsWithNewLot(true);setDrawerProduct(product)}}} notify={notify}/>{totalPages>1&&<div className="flex items-center justify-end gap-2 border-t px-4 py-3"><button className="btn-secondary" disabled={actualPage===1} onClick={()=>setPage(actualPage-1)}>Trang trước</button><span className="text-xs text-slate-500">Trang {actualPage}/{totalPages}</span><button className="btn-secondary" disabled={actualPage===totalPages} onClick={()=>setPage(actualPage+1)}>Trang sau</button></div>}
+        <div className="flex items-center justify-between border-b bg-white px-4 py-2 text-xs text-slate-500"><span>Hiển thị {displayed.length}/{filtered.length} mã phù hợp · luôn hiển thị đầy đủ các lô{role==='admin'&&showPreviousOnly&&previousOnlyCount>0?` · đang hiện ${previousOnlyCount} mã hôm qua có, hôm nay không`:''}{role==='admin'&&sort==='priority'?' · Kéo mã sản phẩm để đổi ưu tiên':''}</span><span>{role==='sale'?formatDate(chatDate):`${formatDate(chatDate)} ↔ ${formatDate(compareDate)}`}</span></div><ComparisonTable rows={displayed} products={products} userId={user.uid} role={role} reorderEnabled={role==='admin'&&sort==='priority'} reorderBusy={reorderBusy} onReorder={reorderRecords} onAddLot={addLot} notify={notify}/>{totalPages>1&&<div className="flex items-center justify-end gap-2 border-t px-4 py-3"><button className="btn-secondary" disabled={actualPage===1} onClick={()=>setPage(actualPage-1)}>Trang trước</button><span className="text-xs text-slate-500">Trang {actualPage}/{totalPages}</span><button className="btn-secondary" disabled={actualPage===totalPages} onClick={()=>setPage(actualPage+1)}>Trang sau</button></div>}
       </section>
     </main>
     {pickerOpen&&<ProductPicker products={products} onClose={()=>setPickerOpen(false)} onPick={(product)=>{setPickerOpen(false);setDrawerStartsWithNewLot(false);setDrawerProduct(product)}}/>}{drawerProduct&&<RecordDrawer product={drawerProduct} chatDate={chatDate} current={selectedRecord} previous={selectedPreviousDay} previousDate={previousDayDate} canViewPreviousInline={role==='admin'} startWithNewLot={drawerStartsWithNewLot} userId={user.uid} onClose={()=>{setDrawerProduct(undefined);setDrawerStartsWithNewLot(false)}} notify={notify}/>}<Suspense fallback={<div className="fixed inset-0 z-[75] grid place-items-center bg-slate-950/40 text-white"><span className="flex items-center gap-2 rounded-xl bg-slate-900 px-4 py-3"><RefreshCw className="animate-spin" size={17}/>Đang tải công cụ…</span></div>}>{productsOpen&&<ProductManager products={products} onClose={()=>setProductsOpen(false)} notify={notify}/>} {reportOpen&&<ReportExportDialog rows={filtered} products={products} date={chatDate} onClose={()=>setReportOpen(false)} notify={notify}/>} {adminOpen&&role==='admin'&&<AdminPanel currentUid={user.uid} onClose={()=>setAdminOpen(false)} notify={notify}/>} {auditOpen&&role==='admin'&&<AuditPanel onClose={()=>setAuditOpen(false)}/>}</Suspense> {cloneOpen&&role==='admin'&&<CloneDateDialog availableDates={availableDates} defaultSourceDate={compareDate} defaultTargetDate={chatDate} userId={user.uid} onClose={()=>setCloneOpen(false)} onCompleted={(targetDate,message)=>{setCloneOpen(false);setChatDate(targetDate);setManualCompare(false);notify(message)}}/>} {toast&&<div className={`toast ${toast.error?'toast-error':'toast-success'}`} role="status" aria-live="polite">{toast.error?<TriangleAlert size={18}/>:<Cloud size={18}/>} {toast.message}</div>}
