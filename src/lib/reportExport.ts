@@ -147,8 +147,9 @@ function loadPdfMake() {
   return pdfMakeLoader
 }
 
-function optimizedTitleText(report: NearDateReportProduct[], date: string) {
-  return `DANH SÁCH HÀNG CẬN DATE  •  ${formatDate(date)}  •  ${report.length} mã  •  ${report.reduce((sum, item) => sum + item.lots.length, 0)} dòng NSX`
+// The date is returned on its own so it can be printed larger: sheets of consecutive days must be told apart at a glance.
+function optimizedTitleParts(report: NearDateReportProduct[], date: string) {
+  return { label: 'DANH SÁCH HÀNG CẬN DATE  •  ', date: formatDate(date), summary: `  •  ${report.length} mã  •  ${report.reduce((sum, item) => sum + item.lots.length, 0)} dòng NSX` }
 }
 
 function optimizedPdfCells(printMode: ReportPrintMode, tuning: ReportTuning, autoScale: number, emphasis: ReportEmphasis) {
@@ -173,7 +174,7 @@ function optimizedPdfCells(printMode: ReportPrintMode, tuning: ReportTuning, aut
   return {
     innerLineWidth,
     widths: [...fixedWidths, noteWidth, groupWidth] as (number | string)[],
-    title: (text: string): Content => ({ text, bold: true, alignment: 'center', color: monochrome ? '#000000' : `#${BRAND}`, fontSize: font(7.5), margin: [0,0,0,5] }),
+    title: ({ label, date, summary }: ReturnType<typeof optimizedTitleParts>): Content => ({ text: [label, { text: date, fontSize: font(12) }, summary], bold: true, alignment: 'center', color: monochrome ? '#000000' : `#${BRAND}`, fontSize: font(9), margin: [0,0,0,5] }),
     header: (): TableCell[] => ['TÊN SẢN PHẨM', 'MỚI?', 'NSX', 'SL (GÓI)', '%', 'GHI CHÚ SALE', 'NHÓM'].map((label) => pdfCell(label, {
       bold: true,
       color: monochrome ? '#000000' : `#${BRAND}`,
@@ -228,7 +229,7 @@ async function measureOptimizedLayout(pdfMake: PdfMake, report: NearDateReportPr
     pageSize: { width: A4_WIDTH, height: Math.max(A4_HEIGHT, body.length * 160) },
     pageMargins: OPTIMIZED_PAGE_MARGINS,
     defaultStyle: { font: 'Roboto', fontSize: 10, color: '#0F172A', lineHeight: 1.18 },
-    content: [cells.title(optimizedTitleText(report,date)), { table: { widths: cells.widths, body }, layout: cells.layout } as Content],
+    content: [cells.title(optimizedTitleParts(report,date)), { table: { widths: cells.widths, body }, layout: cells.layout } as Content],
     pageBreakBefore: (node) => {
       if (node.id && node.startPosition) tops.set(node.id, node.startPosition.top)
       return false
@@ -421,7 +422,11 @@ export async function createNearDateWordBlob(report: NearDateReportProduct[], da
     new Paragraph({
       alignment: AlignmentType.CENTER,
       spacing: { before: 0, after: 80 },
-      children: [new TextRun({ text: `Ngày dữ liệu: ${formatDate(date)}  •  ${report.length} mã  •  ${report.reduce((sum, item) => sum + item.lots.length, 0)} dòng NSX`, color: MUTED, size: 20, font: 'Arial' })],
+      children: [
+        new TextRun({ text: 'Ngày dữ liệu: ', color: MUTED, size: 20, font: 'Arial' }),
+        new TextRun({ text: formatDate(date), bold: true, color: monochrome ? '000000' : BRAND, size: 30, font: 'Arial' }),
+        new TextRun({ text: `  •  ${report.length} mã  •  ${report.reduce((sum, item) => sum + item.lots.length, 0)} dòng NSX`, color: MUTED, size: 20, font: 'Arial' }),
+      ],
     }),
   ]
 
@@ -450,7 +455,11 @@ export async function createNearDateWordBlob(report: NearDateReportProduct[], da
     optimizedHeader = new Header({ children: [new Paragraph({
       alignment: AlignmentType.CENTER,
       spacing: { before: 0, after: 0 },
-      children: [new TextRun({ text: optimizedTitleText(report,date), bold: true, color: monochrome ? '000000' : BRAND, size: optimizedFontSize(15), font: 'Arial' })],
+      children: (({ label, date: dateText, summary }) => [
+        new TextRun({ text: label, bold: true, color: monochrome ? '000000' : BRAND, size: optimizedFontSize(18), font: 'Arial' }),
+        new TextRun({ text: dateText, bold: true, color: monochrome ? '000000' : BRAND, size: optimizedFontSize(24), font: 'Arial' }),
+        new TextRun({ text: summary, bold: true, color: monochrome ? '000000' : BRAND, size: optimizedFontSize(18), font: 'Arial' }),
+      ])(optimizedTitleParts(report,date)),
     })] })
     const productBorder = { style: BorderStyle.SINGLE, size: monochrome ? 12 : 7, color: monochrome ? '000000' : BRAND }
     const segments = layout.segments
@@ -670,7 +679,7 @@ export async function createNearDatePdfBlob(report: NearDateReportProduct[], dat
 
   const content: Content[] = layoutMode === 'optimized' ? [] : [
     { text: 'DANH SÁCH HÀNG CẬN DATE', style: 'title' },
-    { text: `Ngày dữ liệu: ${formatDate(date)}  •  ${report.length} mã  •  ${report.reduce((sum, item) => sum + item.lots.length, 0)} dòng NSX`, style: 'summary' },
+    { text: ['Ngày dữ liệu: ', { text: formatDate(date), bold: true, fontSize: 15, color: monochrome ? '#000000' : `#${BRAND}` }, `  •  ${report.length} mã  •  ${report.reduce((sum, item) => sum + item.lots.length, 0)} dòng NSX`], style: 'summary' },
   ]
   if (!report.length) content.push({ text: 'Không có dữ liệu phù hợp để xuất.', alignment: 'center', color: `#${MUTED}`, margin: [0, 40, 0, 0] })
 
@@ -722,7 +731,7 @@ export async function createNearDatePdfBlob(report: NearDateReportProduct[], dat
         })
       })
       return [
-        cells.title(optimizedTitleText(report,date)),
+        cells.title(optimizedTitleParts(report,date)),
         { table: { dontBreakRows:true, widths:cells.widths, heights:(rowIndex:number)=>rowIndex===0?'auto':rowHeights[rowIndex-1], body }, layout:cells.layout, margin:[0,0,0,0] } as Content,
       ]
     }
