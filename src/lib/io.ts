@@ -1,9 +1,23 @@
-import ExcelJS from 'exceljs'
 import { PACKAGING_TYPE_LABELS, PRODUCT_GROUP_LABELS, defaultPackaging, lotQuantityInPacks, normalizeProduct, parsePackagingType, parseProductGroup, validatePackaging } from '../domain/product'
 import type { ComparedProduct, DateRecord, Product } from '../types'
 
 type Cell = string | number | boolean
 type Row = Record<string, Cell>
+
+export class ExcelLoadError extends Error {
+  constructor(cause: unknown) {
+    super('Không tải được công cụ Excel. Hãy kiểm tra mạng rồi tải lại trang.', { cause })
+  }
+}
+
+// exceljs is about 900 KB, so it is fetched only when an Excel action actually runs.
+async function loadExcelJS() {
+  try {
+    return (await import('exceljs')).default
+  } catch (error) {
+    throw new ExcelLoadError(error)
+  }
+}
 
 function triggerDownload(blob: Blob, filename: string) {
   const url = URL.createObjectURL(blob)
@@ -22,6 +36,7 @@ async function downloadRows(rows: Row[], name: string, type: 'csv' | 'xlsx') {
     triggerDownload(new Blob([`\ufeff${csv}`], { type: 'text/csv;charset=utf-8' }), `${name}.csv`)
     return
   }
+  const ExcelJS = await loadExcelJS()
   const workbook = new ExcelJS.Workbook()
   const sheet = workbook.addWorksheet('Dữ liệu')
   sheet.columns = headers.map((header) => ({ header, key: header, width: Math.max(14, Math.min(36, header.length + 4)) }))
@@ -40,6 +55,7 @@ export function exportProducts(products: Product[], type: 'csv' | 'xlsx') {
 }
 
 export async function downloadProductTemplate() {
+  const ExcelJS = await loadExcelJS()
   const workbook = new ExcelJS.Workbook()
   workbook.creator = 'Chat Cận Date'
   const sheet = workbook.addWorksheet('Danh mục sản phẩm', { views: [{ state: 'frozen', ySplit: 1 }] })
@@ -152,6 +168,7 @@ export async function parseProductFile(file: File): Promise<ParsedProduct[]> {
   let rows: Record<string, unknown>[]
   if (file.name.toLowerCase().endsWith('.csv')) rows = parseCsv(await file.text())
   else {
+    const ExcelJS = await loadExcelJS()
     const workbook = new ExcelJS.Workbook()
     await workbook.xlsx.load(await file.arrayBuffer())
     const sheet = workbook.worksheets[0]
