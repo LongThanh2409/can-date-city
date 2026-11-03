@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { mkdir, writeFile } from 'node:fs/promises'
-import { createNearDatePdfBlob, createNearDateWordBlob, estimateOptimizedPageCount, prepareNearDateReport, reportEmphasisKey, resolveReportOrientation } from './reportExport'
+import { createNearDatePdfBlob, createNearDateWordBlob, estimateOptimizedPageCount, prepareNearDateReport, reportAutoEmphasis, reportEmphasisKey, resolveReportOrientation } from './reportExport'
 import type { NearDateReportProduct } from './reportExport'
 import type { ComparedProduct, DateRecord, Product } from '../types'
 
@@ -32,6 +32,22 @@ describe('prepareNearDateReport', () => {
     expect(reportEmphasisKey('SP001','saleNote')).toBe('SP001|saleNote||')
     expect(reportEmphasisKey('SP001','productionDate','2026-10-01',40)).toBe('SP001|productionDate|2026-10-01|40')
     expect(reportEmphasisKey('SP001','datePercent','2026-10-01',40)).not.toBe(reportEmphasisKey('SP001','productionDate','2026-10-01',40))
+  })
+
+  it('tự tô đậm theo ghi chú Sale, chỉ tô % của lô được chỉ định', () => {
+    const base = { productName:'', vietnameseName:'', packaging:'', productGroup:'', isNewDate:false }
+    const lot = (productionDate:string,datePercent:number) => ({ productionDate, datePercent, quantityPacks:1 })
+    expect(reportAutoEmphasis([
+      { ...base, productCode:'A', saleNote:'BIGC ĐI DATE 52%\nCÒN LẠI ĐI 61', lots:[lot('2026-09-22',52),lot('2026-09-30',61),lot('2026-10-01',70)] },
+      { ...base, productCode:'B', saleNote:'ĐI FIFO', lots:[lot('2026-09-22',52)] },
+      { ...base, productCode:'C', saleNote:'ĐI FIFO 30G', lots:[lot('2026-09-22',30)] },
+    ])).toEqual([
+      reportEmphasisKey('A','productName'),
+      reportEmphasisKey('A','saleNote'),
+      reportEmphasisKey('A','datePercent','2026-09-22',52),
+      reportEmphasisKey('A','datePercent','2026-09-30',61),
+      reportEmphasisKey('C','saleNote'),
+    ])
   })
 
   it('giữ % date theo từng NSX và ghi chú Sale theo mã', () => {

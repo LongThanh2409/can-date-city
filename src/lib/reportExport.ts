@@ -1,4 +1,5 @@
 import type { Content, ContentText, TableCell, TableCellProperties, TDocumentDefinitions } from 'pdfmake/interfaces'
+import { analyzeSaleNote, type SaleNoteRun } from '../domain/noteEmphasis'
 import { lotQuantityInPacks, packagingSummary, PRODUCT_GROUP_LABELS } from '../domain/product'
 import { formatDate } from './date'
 import type { ComparedProduct, Product } from '../types'
@@ -26,12 +27,6 @@ export type ReportLayoutMode = 'optimized' | 'compact' | 'detailed'
 export type ReportTuning = { densityLevel: number; fontLevel: number }
 export type ReportPageTarget = 2 | 3
 export type ReportEmphasisField = 'productCode' | 'productName' | 'saleNote' | 'productionDate' | 'datePercent'
-export type ReportEmphasisSuggestion = {
-  productCode: string
-  fields: Array<'productCode' | 'productName' | 'saleNote'>
-  lots: Array<{ productionDate: string; datePercent: number; fields: Array<'productionDate' | 'datePercent'> }>
-  reason: string
-}
 export type ReportEmphasis = string[]
 
 export const DEFAULT_REPORT_TUNING: ReportTuning = { densityLevel: 0, fontLevel: 0 }
@@ -42,6 +37,22 @@ export function reportEmphasisKey(productCode: string, field: ReportEmphasisFiel
 
 function emphasized(emphasis: ReportEmphasis, item: NearDateReportProduct, field: ReportEmphasisField, lot?: NearDateReportLot) {
   return emphasis.includes(reportEmphasisKey(item.productCode,field,lot?.productionDate??'',lot?.datePercent??''))
+}
+
+// A marked note is bolded clause by clause, so long notes do not turn the whole page bold.
+function saleNoteRuns(emphasis: ReportEmphasis, item: NearDateReportProduct): SaleNoteRun[] {
+  return emphasized(emphasis,item,'saleNote') ? analyzeSaleNote(item.saleNote).runs : [{ text:item.saleNote, bold:false }]
+}
+
+export function reportAutoEmphasis(report: NearDateReportProduct[]): ReportEmphasis {
+  return report.flatMap((item) => {
+    const { runs, emphasizeName, designatedPercents } = analyzeSaleNote(item.saleNote)
+    return [
+      ...(emphasizeName ? [reportEmphasisKey(item.productCode,'productName')] : []),
+      ...(runs.some((run) => run.bold) ? [reportEmphasisKey(item.productCode,'saleNote')] : []),
+      ...item.lots.filter((lot) => lot.productionDate && designatedPercents.includes(lot.datePercent)).map((lot) => reportEmphasisKey(item.productCode,'datePercent',lot.productionDate,lot.datePercent)),
+    ]
+  })
 }
 
 type ResolvedReportOrientation = Exclude<ReportOrientation, 'auto'>
@@ -198,7 +209,7 @@ function optimizedPdfCells(printMode: ReportPrintMode, tuning: ReportTuning, aut
     productionDate: (item: NearDateReportProduct, lot: NearDateReportLot, id?: string) => pdfCell(lot.productionDate?formatDate(lot.productionDate):'—',{id,bold:emphasized(emphasis,item,'productionDate',lot),alignment:'center',fontSize:font(7.5),lineHeight,margin:lotMargin}),
     quantity: (lot: NearDateReportLot) => pdfCell(pdfQuantity(lot.quantityPacks,font(7.7)),{alignment:'center',lineHeight,margin:lotMargin}),
     datePercent: (item: NearDateReportProduct, lot: NearDateReportLot) => pdfCell(lot.productionDate?`${lot.datePercent}%`:'—',{bold:emphasized(emphasis,item,'datePercent',lot),color:monochrome?'#000000':`#${BRAND}`,alignment:'center',fontSize:font(8.5),lineHeight,margin:lotMargin}),
-    note: (item: NearDateReportProduct, rowSpan: number) => pdfCell(item.saleNote||'',{rowSpan,bold:emphasized(emphasis,item,'saleNote'),color:monochrome?'#000000':item.saleNote?'#422006':`#${MUTED}`,alignment:item.saleNote?'left':'center',fillColor:item.saleNote&&!monochrome?`#${NOTE_FILL}`:'#FFFFFF',fontSize:font(7.6),lineHeight,margin:textMargin}),
+    note: (item: NearDateReportProduct, rowSpan: number) => pdfCell(saleNoteRuns(emphasis,item) as Content,{rowSpan,color:monochrome?'#000000':item.saleNote?'#422006':`#${MUTED}`,alignment:item.saleNote?'left':'center',fillColor:item.saleNote&&!monochrome?`#${NOTE_FILL}`:'#FFFFFF',fontSize:font(7.6),lineHeight,margin:textMargin}),
     group: (label: string, rowSpan: number, border?: [boolean,boolean,boolean,boolean]) => pdfCell(label,{rowSpan,border,bold:true,alignment:'center',fontSize:font(6.5),lineHeight,margin:lotMargin}),
     blank: () => pdfCell('', { fontSize: font(6.5), lineHeight, margin: lotMargin }),
   }
@@ -394,8 +405,8 @@ export async function createNearDateWordBlob(report: NearDateReportProduct[], da
     borders: options.borders,
   })
   // Word ignores "\n" inside a run, so each line of a Sale note becomes its own run after a break.
-  const textRuns = (text: string, options: { bold?: boolean; color?: string; size: number }) => text.split('\n').map((line, index) => new TextRun({ text: line, bold: options.bold, color: options.color, size: options.size, font: 'Arial', break: index ? 1 : undefined }))
-  const textParagraph = (text: string, options: { bold?: boolean; color?: string; size?: number; align?: typeof AlignmentType[keyof typeof AlignmentType]; keepNext?: boolean } = {}) => new Paragraph({
+  const textRuns = (text: string | SaleNoteRun[], options: { bold?: boolean; color?: string; size: number }) => (typeof text === 'string' ? [{ text, bold: options.bold }] : text).flatMap((run) => run.text.split('\n').map((line, index) => new TextRun({ text: line, bold: run.bold, color: options.color, size: options.size, font: 'Arial', break: index ? 1 : undefined })))
+  const textParagraph = (text: string | SaleNoteRun[], options: { bold?: boolean; color?: string; size?: number; align?: typeof AlignmentType[keyof typeof AlignmentType]; keepNext?: boolean } = {}) => new Paragraph({
     alignment: options.align,
     keepNext: options.keepNext,
     spacing: { before: 0, after: 0, line: 276 },
@@ -446,7 +457,7 @@ export async function createNearDateWordBlob(report: NearDateReportProduct[], da
     const optimizedWidths = [2640, 920, 1320, 1040, 800, 3680, 1100]
     const optimizedTotal = optimizedWidths.reduce((sum, width) => sum + width, 0)
     const optimizedMargins = { top: Math.round(28*effectiveDensity), bottom: Math.round(28*effectiveDensity), left: 45, right: 45 }
-    const optimizedParagraph = (text: string, options: { bold?: boolean; color?: string; size?: number; align?: typeof AlignmentType[keyof typeof AlignmentType]; keepNext?: boolean } = {}) => new Paragraph({
+    const optimizedParagraph = (text: string | SaleNoteRun[], options: { bold?: boolean; color?: string; size?: number; align?: typeof AlignmentType[keyof typeof AlignmentType]; keepNext?: boolean } = {}) => new Paragraph({
       alignment: options.align,
       keepNext: options.keepNext,
       spacing: { before: 0, after: 0, line: optimizedLine },
@@ -493,7 +504,7 @@ export async function createNearDateWordBlob(report: NearDateReportProduct[], da
           cell([optimizedParagraph(lot.productionDate ? `${lot.datePercent}%` : '—', { bold: emphasized(emphasis,item,'datePercent',lot), color: monochrome ? '000000' : BRAND, size: 17, align: AlignmentType.CENTER, keepNext })], optimizedWidths[4], { borders: rowBorder, margins: optimizedMargins }),
         )
         if (first) rowCells.push(cell([
-          optimizedParagraph(item.saleNote, { bold: emphasized(emphasis,item,'saleNote'), color: monochrome ? '000000' : '422006', size: item.saleNote ? 15 : 10, keepNext }),
+          optimizedParagraph(saleNoteRuns(emphasis,item), { color: monochrome ? '000000' : '422006', size: item.saleNote ? 15 : 10, keepNext }),
         ], optimizedWidths[5], {
           rowSpan: lots.length,
           verticalAlign: item.saleNote ? VerticalAlign.TOP : VerticalAlign.CENTER,
@@ -513,7 +524,7 @@ export async function createNearDateWordBlob(report: NearDateReportProduct[], da
     const compactWidths = actualOrientation === 'landscape' ? [3400, 1300, 2000, 1600, 1200, 4600, 1200] : [2500, 1000, 1500, 1250, 900, 2310, 1000]
     const compactTotal = compactWidths.reduce((sum, width) => sum + width, 0)
     const compactMargins = { top: 55, bottom: 55, left: 85, right: 85 }
-    const compactParagraph = (text: string, options: { bold?: boolean; color?: string; size?: number; align?: typeof AlignmentType[keyof typeof AlignmentType] } = {}) => new Paragraph({
+    const compactParagraph = (text: string | SaleNoteRun[], options: { bold?: boolean; color?: string; size?: number; align?: typeof AlignmentType[keyof typeof AlignmentType] } = {}) => new Paragraph({
       alignment: options.align,
       spacing: { before: 0, after: 0, line: 220 },
       children: textRuns(text, { bold: options.bold, color: options.color, size: options.size ?? 17 }),
@@ -559,7 +570,7 @@ export async function createNearDateWordBlob(report: NearDateReportProduct[], da
         )
         if (first) {
           rowCells.push(cell(item.saleNote ? [
-            compactParagraph(item.saleNote, { bold: emphasized(emphasis,item,'saleNote'), color: monochrome ? '000000' : '422006', size: 18 }),
+            compactParagraph(saleNoteRuns(emphasis,item), { color: monochrome ? '000000' : '422006', size: 18 }),
           ] : [compactParagraph('—', { color: MUTED, size: 17, align: AlignmentType.CENTER })], compactWidths[5], {
             verticalAlign: item.saleNote ? VerticalAlign.TOP : VerticalAlign.CENTER,
             fill: item.saleNote && !monochrome ? NOTE_FILL : 'FFFFFF',
@@ -603,7 +614,7 @@ export async function createNearDateWordBlob(report: NearDateReportProduct[], da
         tableHeader: true,
         children: [cell([
           textParagraph(monochrome ? 'GHI CHÚ SALE - ƯU TIÊN THỰC HIỆN' : 'GHI CHÚ SALE', { bold: true, color: monochrome ? '000000' : NOTE_INK, size: monochrome ? 20 : 18, keepNext: true }),
-          textParagraph(item.saleNote || 'Chưa có ghi chú Sale.', { bold: emphasized(emphasis,item,'saleNote'), color: monochrome ? '000000' : item.saleNote ? '422006' : MUTED, size: item.saleNote ? (monochrome ? 23 : 22) : 19, keepNext: true }),
+          textParagraph(item.saleNote ? saleNoteRuns(emphasis,item) : 'Chưa có ghi chú Sale.', { color: monochrome ? '000000' : item.saleNote ? '422006' : MUTED, size: item.saleNote ? (monochrome ? 23 : 22) : 19, keepNext: true }),
         ], tableWidth, { fill: monochrome ? 'FFFFFF' : NOTE_FILL, span: 3, verticalAlign: VerticalAlign.TOP, borders: monochrome ? { top: emphasisBorder, bottom: emphasisBorder, left: emphasisBorder, right: emphasisBorder, insideHorizontal: emphasisBorder, insideVertical: emphasisBorder } : undefined })],
       }),
       new TableRow({
@@ -772,7 +783,7 @@ export async function createNearDatePdfBlob(report: NearDateReportProduct[], dat
             pdfCell(lot.productionDate ? `${lot.datePercent}%` : '—', { bold: emphasized(emphasis,item,'datePercent',lot), color: monochrome ? '#000000' : `#${BRAND}`, alignment: 'center', fontSize: 11, margin: [4, 4, 4, 4] }),
           )
           if (first) row.push(pdfCell(item.saleNote ? [
-            { text: item.saleNote, bold: emphasized(emphasis,item,'saleNote'), color: monochrome ? '#000000' : '#422006', fontSize: 9 },
+            { text: saleNoteRuns(emphasis,item), color: monochrome ? '#000000' : '#422006', fontSize: 9 },
           ] : '—', { rowSpan: segment.length, alignment: item.saleNote ? 'left' : 'center', fillColor: item.saleNote && !monochrome ? `#${NOTE_FILL}` : '#FFFFFF', margin: [5, 4, 5, 4] }))
           else row.push({})
           if (first) row.push(pdfCell(item.productGroup, { rowSpan: segment.length, bold: true, alignment: 'center', fontSize: 7, margin: [2, 4, 2, 4] }))
@@ -798,7 +809,7 @@ export async function createNearDatePdfBlob(report: NearDateReportProduct[], dat
       [
         pdfCell([
           { text: monochrome ? 'GHI CHÚ SALE - ƯU TIÊN THỰC HIỆN\n' : 'GHI CHÚ SALE\n', bold: true, color: monochrome ? '#000000' : `#${NOTE_INK}`, fontSize: monochrome ? 10 : 9 },
-          { text: item.saleNote || 'Chưa có ghi chú Sale.', bold: emphasized(emphasis,item,'saleNote'), color: monochrome ? '#000000' : item.saleNote ? '#422006' : `#${MUTED}`, fontSize: item.saleNote ? (monochrome ? 12 : 11) : 9 },
+          { text: item.saleNote ? saleNoteRuns(emphasis,item) : 'Chưa có ghi chú Sale.', color: monochrome ? '#000000' : item.saleNote ? '#422006' : `#${MUTED}`, fontSize: item.saleNote ? (monochrome ? 12 : 11) : 9 },
         ], { colSpan: 3, fillColor: monochrome ? '#FFFFFF' : `#${NOTE_FILL}` }),
         {},
         {},
