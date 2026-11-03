@@ -154,6 +154,9 @@ function loadPdfMake() {
   ]).then(([{ default: pdfMake }, { default: roboto }]) => {
     pdfMake.addFontContainer(roboto)
     return pdfMake
+  }).catch((error) => {
+    pdfMakeLoader = undefined
+    throw error
   })
   return pdfMakeLoader
 }

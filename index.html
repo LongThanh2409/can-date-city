@@ -7,7 +7,24 @@
     <title>Chat Cận Date</title>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <!-- React replaces this on first render. It stays visible, instead of a blank page, if the main bundle never loads. -->
+      <div style="min-height:100vh;display:grid;place-items:center;padding:16px;text-align:center;font-family:system-ui,sans-serif;color:#334155">
+        <div>
+          <p style="margin:0">Đang tải ứng dụng…</p>
+          <div id="boot-retry" style="display:none;margin-top:12px">
+            <p style="margin:0 0 12px;font-size:14px">Tải lâu hơn bình thường, mạng có thể đang chập chờn.</p>
+            <button type="button" onclick="location.reload()" style="padding:9px 16px;border:0;border-radius:10px;background:#0f766e;color:#fff;font:inherit;font-weight:600;cursor:pointer">Tải lại trang</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <script>
+      setTimeout(function () {
+        var retry = document.getElementById('boot-retry')
+        if (retry) retry.style.display = 'block'
+      }, 12000)
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
