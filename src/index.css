@@ -45,4 +45,5 @@
   .menu button { @apply block w-full px-3 py-2 text-left text-sm hover:bg-slate-50; }
   .toast { @apply fixed bottom-4 left-4 right-4 z-[80] flex max-w-md items-center gap-2 rounded-xl px-4 py-3 font-medium text-white shadow-xl sm:bottom-5 sm:left-auto sm:right-5; }
   .toast-success { @apply bg-emerald-700; } .toast-error { @apply bg-rose-700; }
+  .version-badge { @apply pointer-events-none fixed bottom-1 left-1 z-40 rounded bg-slate-900/70 px-1.5 py-0.5 font-mono text-[10px] leading-4 text-white; }
 }
