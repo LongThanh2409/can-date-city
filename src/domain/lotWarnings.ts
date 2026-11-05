@@ -5,8 +5,7 @@ import type { DateRecord, Lot, Product } from '../types'
 
 export interface LotWarning {
   id: string
-  /** Absent when the warning is about the whole record rather than one lot. */
-  lotId?: string
+  lotId: string
   message: string
 }
 
@@ -92,7 +91,7 @@ function swapDayMonth(date: string): string | undefined {
 
 export function lotWarnings({ chatDate, lots, isNewDate, history, product }: LotWarningInput): LotWarning[] {
   const warnings: LotWarning[] = []
-  const add = (id: string, message: string, lotId?: string) => warnings.push({ id, lotId, message })
+  const add = (id: string, message: string, lotId: string) => warnings.push({ id, lotId, message })
   const others = history.filter((record) => record.chatDate !== chatDate)
   const rate = estimateDailyDrop(others)
   const earlier = others.filter((record) => record.chatDate < chatDate).sort((a, b) => b.chatDate.localeCompare(a.chatDate))
@@ -129,7 +128,6 @@ export function lotWarnings({ chatDate, lots, isNewDate, history, product }: Lot
 
   const previousLots = previous?.lots.filter(isComplete) ?? []
   const { matches, unmatchedPrevious } = matchLots(complete, previousLots)
-  const unmatched = complete.filter((lot) => !matches.has(lot))
   const isFarDate = (lot: Lot) => {
     const references = [...complete.filter((other) => other !== lot), ...previousLots].map((other) => other.productionDate)
     return references.length > 0 && references.every((date) => Math.abs(daysBetween(lot.productionDate, date)) >= FAR_DATE_DAYS)
@@ -181,14 +179,5 @@ export function lotWarnings({ chatDate, lots, isNewDate, history, product }: Lot
     }
   })
 
-  if (previous && complete.length) {
-    const grew = complete.some((lot) => {
-      const before = matches.get(lot)
-      const quantity = quantityOf(lot, product), beforeQuantity = before ? quantityOf(before, product) : null
-      return quantity !== null && beforeQuantity !== null && quantity > beforeQuantity
-    })
-    if (isNewDate === false && unmatched.length) add('status:no-new', `Đã chọn "Không có mới" nhưng có ${unmatched.length} lô chưa có ở ngày ${formatDate(previous.chatDate)}.`)
-    if (isNewDate === true && !unmatched.length && !grew) add('status:new', `Đã chọn "Có mới" nhưng không có lô mới và số lượng không tăng so với ngày ${formatDate(previous.chatDate)}.`)
-  }
   return warnings
 }

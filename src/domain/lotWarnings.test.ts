@@ -101,7 +101,7 @@ describe('so với ngày trước đó', () => {
   it('gợi ý NSX bị đảo ngày/tháng', () => {
     const warnings = lotWarnings({ chatDate: '2026-11-06', isNewDate: false, history: yesterday([lot('2026-05-03', 64)]), lots: [lot('2026-03-05', 63)] })
     expect(warnings[0].message).toContain('03/05/2026')
-    expect(warnings.map((warning) => warning.id.split(':')[0])).toEqual(['swap', 'status'])
+    expect(warnings.map((warning) => warning.id.split(':')[0])).toEqual(['swap'])
   })
   it('cảnh báo lô mới có NSX cũ hơn mọi lô đang có', () => {
     expect(codes({ isNewDate: true, lots: [lot('2026-09-01', 64), lot('2026-08-29', 30)], history: yesterday([lot('2026-09-01', 65)]) })).toContain('older')
@@ -110,11 +110,9 @@ describe('so với ngày trước đó', () => {
     expect(codes({ isNewDate: false, lots: [lot('2026-09-01', 64, { quantity: 15 })], history: yesterday([lot('2026-09-01', 64)]) })).toEqual(['grew'])
     expect(codes({ isNewDate: true, lots: [lot('2026-09-01', 64, { quantity: 100 })], history: yesterday([lot('2026-09-01', 64)]) })).toEqual(['jump'])
   })
-  it('cảnh báo trạng thái có mới mâu thuẫn, ở mức cả mã', () => {
-    const warnings = lotWarnings({ chatDate: '2026-11-06', isNewDate: true, lots: [lot('2026-09-01', 64)], history: yesterday([lot('2026-09-01', 64)]) })
-    expect(warnings).toHaveLength(1)
-    expect(warnings[0].lotId).toBeUndefined()
-    expect(codes({ isNewDate: false, lots: [lot('2026-09-01', 64), lot('2026-10-30', 95)], history: yesterday([lot('2026-09-01', 64)]) })).toEqual(['status'])
+  it('trạng thái có mới không tự gây cảnh báo khi có hoặc không có lô mới', () => {
+    expect(codes({ isNewDate: true, lots: [lot('2026-09-01', 64)], history: yesterday([lot('2026-09-01', 64)]) })).toEqual([])
+    expect(codes({ isNewDate: false, lots: [lot('2026-09-01', 64), lot('2026-10-30', 95)], history: yesterday([lot('2026-09-01', 64)]) })).toEqual([])
   })
   it('vẫn nhận ra cùng lô khi đổi mã lô', () => {
     expect(codes({ lots: [lot('2026-09-01', 86, { lotLabel: 'mới' })], history: yesterday([lot('2026-09-01', 64, { lotLabel: 'cũ' })]) })).toEqual(['rise'])
