@@ -19,6 +19,12 @@ export function previousCalendarDay(value: string): string {
   return date.toISOString().slice(0, 10)
 }
 
+/** Whole days from one yyyy-mm-dd date to another; NaN when either is not a date. */
+export function daysBetween(from: string, to: string): number {
+  const utc = (value: string) => /^\d{4}-\d{2}-\d{2}$/.test(value) ? Date.parse(`${value}T00:00:00Z`) : Number.NaN
+  return Math.round((utc(to) - utc(from)) / 86_400_000)
+}
+
 export function closestPreviousDate(current: string, availableDates: string[]): string | undefined {
   return [...new Set(availableDates)].filter((date) => date < current).sort().at(-1)
 }

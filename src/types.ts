@@ -132,4 +132,5 @@ export interface Filters {
   percentMax: string
   presence: 'all' | 'one-side'
   noteState: 'all' | 'noted' | 'not-noted'
+  warningState: 'all' | 'warning'
 }
