@@ -22,6 +22,16 @@ interface QueueItem {
   error?: string
 }
 
+/** Turns a Firestore error into a reason the admin can act on. */
+function uploadErrorMessage(error: unknown): string {
+  const code = typeof error === 'object' && error && 'code' in error ? String((error as { code: unknown }).code) : ''
+  if (code === 'permission-denied') return 'Bị chặn quyền: cần publish Firestore Rules mới'
+  if (code === 'unavailable' || code === 'deadline-exceeded') return 'Mất kết nối, hãy thử lại'
+  if (code === 'resource-exhausted') return 'Hết hạn mức Firestore hôm nay'
+  if (code === 'invalid-argument') return 'Ảnh quá lớn để lưu'
+  return code ? `Gửi ảnh thất bại (${code})` : 'Gửi ảnh thất bại'
+}
+
 const STATUS_LABELS: Record<QueueItem['status'], string> = { waiting: 'Đang chờ…', compressing: 'Đang nén…', uploading: 'Đang gửi…', error: 'Lỗi' }
 /** Uploads run in parallel with compressing the next photo; two at a time keeps the browser responsive. */
 const MAX_PARALLEL_UPLOADS = 2
@@ -93,7 +103,7 @@ export function Nm2Panel({ role, userId, notify, active }: Props) {
       update(item.key, { status: 'uploading' })
       const task = uploadNm2Image(targetDate, compressed.full, compressed.thumbnail, item.name, userId)
         .then(() => { saved += 1; finish(item) })
-        .catch(() => update(item.key, { status: 'error', error: 'Gửi ảnh thất bại.' }))
+        .catch((error) => { console.error('NM2 upload failed', error); update(item.key, { status: 'error', error: uploadErrorMessage(error) }) })
         .finally(() => running.delete(task))
       running.add(task)
       if (running.size >= MAX_PARALLEL_UPLOADS) await Promise.race(running)
