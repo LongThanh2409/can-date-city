@@ -1,7 +1,7 @@
 import { initializeApp } from 'firebase/app'
 import { initializeAppCheck, ReCaptchaEnterpriseProvider } from 'firebase/app-check'
 import { getAuth } from 'firebase/auth'
-import { getFirestore } from 'firebase/firestore'
+import { initializeFirestore, persistentLocalCache, persistentMultipleTabManager } from 'firebase/firestore'
 
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
@@ -23,4 +23,8 @@ if (appCheckSiteKey && typeof window !== 'undefined') {
   initializeAppCheck(firebaseApp,{provider:new ReCaptchaEnterpriseProvider(appCheckSiteKey),isTokenAutoRefreshEnabled:true})
 }
 export const auth = getAuth(firebaseApp)
-export const db = getFirestore(firebaseApp)
+// Cache data on this computer (IndexedDB): the app shows the last data instantly on reopen, then syncs
+// only what changed. Several tabs share one cache. Large enough for two days of factory 2 photos.
+export const db = initializeFirestore(firebaseApp, {
+  localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager(), cacheSizeBytes: 200 * 1024 * 1024 }),
+})
