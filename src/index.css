@@ -47,3 +47,15 @@
   .toast-success { @apply bg-emerald-700; } .toast-error { @apply bg-rose-700; }
   .version-badge { @apply pointer-events-none fixed bottom-1 left-1 z-40 rounded bg-slate-900/70 px-1.5 py-0.5 font-mono text-[10px] leading-4 text-white; }
 }
+
+/* Tab switching: the highlight slides, the newly shown panel fades in. */
+.tab-indicator { transition: transform 220ms cubic-bezier(0.4, 0, 0.2, 1); }
+.tab-panel:not([hidden]) { animation: tab-panel-in 180ms ease-out; }
+@keyframes tab-panel-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+
+.skeleton { border-radius: 0.375rem; background: linear-gradient(90deg, #e2e8f0 0%, #f1f5f9 50%, #e2e8f0 100%); background-size: 200% 100%; animation: skeleton-shimmer 1.2s ease-in-out infinite; }
+@keyframes skeleton-shimmer { from { background-position: 100% 0; } to { background-position: -100% 0; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .tab-indicator, .tab-panel:not([hidden]), .skeleton { transition: none; animation: none; }
+}

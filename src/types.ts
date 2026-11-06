@@ -138,7 +138,10 @@ export interface Filters {
 export interface Nm2Image {
   id: string
   chatDate: string
-  dataUrl: string
+  /** Small preview for the grid. */
+  thumbDataUrl?: string
+  /** Only on photos uploaded before thumbnails existed; newer full photos live in `nm2ImageData/{id}`. */
+  dataUrl?: string
   mimeType: string
   width: number
   height: number

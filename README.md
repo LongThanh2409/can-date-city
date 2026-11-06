@@ -34,9 +34,18 @@ Các giả định nghiệp vụ:
 
 - Chỉ lưu **ảnh** cận date của nhà máy 2, không có bảng số liệu, ghi chú hay đối chiếu.
 - Chỉ **admin** tải ảnh lên (chọn tệp, kéo thả hoặc Ctrl+V); mọi tài khoản được cấp quyền đều xem, phóng to và tải ảnh về.
-- Không dùng Firebase Storage (không cần gói Blaze): ảnh được nén JPEG trên trình duyệt (cạnh dài tối đa 2048px, dưới ~900KB) và lưu thẳng trong collection `nm2Images`; `nm2Days/{ngày}` giữ số ảnh mỗi ngày.
+- Không dùng Firebase Storage (không cần gói Blaze): ảnh được nén JPEG trên trình duyệt và lưu thẳng trong Firestore:
+  - `nm2Images/{id}`: thông tin ảnh + ảnh thu nhỏ (cạnh dài 480px) cho lưới ảnh, tải rất nhẹ.
+  - `nm2ImageData/{id}`: ảnh gốc (cạnh dài tối đa 2048px, dưới ~900KB), chỉ tải khi bấm mở ảnh.
+  - `nm2Days/{ngày}`: số ảnh mỗi ngày.
+- Trình xem ảnh: lăn chuột để phóng to tại con trỏ, kéo để di chuyển, nhấp đúp để phóng/thu, phím ←/→ để chuyển ảnh.
 - Chỉ giữ **2 ngày có ảnh gần nhất** (NM1 vẫn giữ 5 ngày); ngày cũ hơn tự dọn khi admin mở tab NM2.
 - Cần deploy lại Firestore Rules: `firebase deploy --only firestore:rules`.
+
+## Chuyển tab và bộ nhớ đệm
+
+- Hai tab NM1/NM2 được giữ trong trang: chuyển qua lại tức thì, giữ nguyên bộ lọc và vị trí cuộn. Phím tắt `Alt+1` / `Alt+2`; link `…/#nm2` mở thẳng NM2; app nhớ tab dùng lần trước.
+- Firestore bật bộ nhớ đệm trên máy (IndexedDB, tối đa 200MB): mở lại app hiện dữ liệu ngay rồi đồng bộ phần thay đổi. Dữ liệu được lưu trên máy đã đăng nhập, nên chỉ dùng trên máy tin cậy.
 
 ## Chạy trên Windows
 

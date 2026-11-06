@@ -68,12 +68,24 @@ service cloud.firestore {
       allow create: if isAdmin()
         && request.resource.data.chatDate is string
         && request.resource.data.chatDate.size() == 10
-        && request.resource.data.dataUrl is string
-        && request.resource.data.dataUrl.size() < 1000000
+        && request.resource.data.thumbDataUrl is string
+        && request.resource.data.thumbDataUrl.size() < 300000
+        && !('dataUrl' in request.resource.data)
         && request.resource.data.mimeType in ['image/jpeg', 'image/png', 'image/webp']
         && request.resource.data.width is int
         && request.resource.data.height is int
         && request.resource.data.fileName is string
+        && request.resource.data.createdBy == request.auth.uid;
+      allow update: if false;
+      allow delete: if isAdmin();
+    }
+    // Full-size photo for nm2Images/{id}, read only when a photo is opened.
+    match /nm2ImageData/{id} {
+      allow read: if allowed();
+      allow create: if isAdmin()
+        && request.resource.data.chatDate is string
+        && request.resource.data.dataUrl is string
+        && request.resource.data.dataUrl.size() < 1000000
         && request.resource.data.createdBy == request.auth.uid;
       allow update: if false;
       allow delete: if isAdmin();

@@ -48,29 +48,41 @@ async function decode(file: Blob): Promise<{ source: CanvasImageSource; width: n
   }
 }
 
-/** Re-encodes a photo as JPEG, shrinking quality and then size until it fits in a Firestore document. */
-export async function compressImage(file: Blob): Promise<CompressedImage> {
+export const THUMBNAIL_SIDE = 480
+
+function encode(source: CanvasImageSource, width: number, height: number, maxSide: number, quality: number, canvas: HTMLCanvasElement): CompressedImage {
+  const context = canvas.getContext('2d')
+  if (!context) throw new Error('Trình duyệt không hỗ trợ xử lý ảnh.')
+  const size = fitWithin(width, height, maxSide)
+  canvas.width = size.width
+  canvas.height = size.height
+  // JPEG has no transparency; paint white so transparent PNG areas don't turn black.
+  context.fillStyle = '#ffffff'
+  context.fillRect(0, 0, size.width, size.height)
+  context.drawImage(source, 0, 0, size.width, size.height)
+  return { dataUrl: canvas.toDataURL('image/jpeg', quality), mimeType: 'image/jpeg', width: size.width, height: size.height }
+}
+
+/** Re-encodes as JPEG, lowering quality and then size until it fits in a Firestore document. */
+function encodeToFit(source: CanvasImageSource, width: number, height: number): CompressedImage {
+  const canvas = document.createElement('canvas')
+  for (let maxSide = MAX_IMAGE_SIDE; maxSide >= MIN_IMAGE_SIDE; maxSide = Math.round(maxSide * 0.8)) {
+    for (const quality of QUALITY_STEPS) {
+      const result = encode(source, width, height, maxSide, quality, canvas)
+      if (result.dataUrl.length <= MAX_DATA_URL_LENGTH) return result
+    }
+  }
+  throw new Error('Ảnh quá lớn, không thể nén đủ nhỏ để lưu.')
+}
+
+/** Full photo that fits in one Firestore document, plus a small thumbnail for the grid. Decodes the file once. */
+export async function compressImageWithThumbnail(file: Blob): Promise<{ full: CompressedImage; thumbnail: CompressedImage }> {
   const decoded = await decode(file)
   try {
-    const canvas = document.createElement('canvas')
-    const context = canvas.getContext('2d')
-    if (!context) throw new Error('Trình duyệt không hỗ trợ xử lý ảnh.')
-    let maxSide = MAX_IMAGE_SIDE
-    while (maxSide >= MIN_IMAGE_SIDE) {
-      const size = fitWithin(decoded.width, decoded.height, maxSide)
-      canvas.width = size.width
-      canvas.height = size.height
-      // JPEG has no transparency; paint white so transparent PNG areas don't turn black.
-      context.fillStyle = '#ffffff'
-      context.fillRect(0, 0, size.width, size.height)
-      context.drawImage(decoded.source, 0, 0, size.width, size.height)
-      for (const quality of QUALITY_STEPS) {
-        const dataUrl = canvas.toDataURL('image/jpeg', quality)
-        if (dataUrl.length <= MAX_DATA_URL_LENGTH) return { dataUrl, mimeType: 'image/jpeg', width: size.width, height: size.height }
-      }
-      maxSide = Math.round(maxSide * 0.8)
+    return {
+      full: encodeToFit(decoded.source, decoded.width, decoded.height),
+      thumbnail: encode(decoded.source, decoded.width, decoded.height, THUMBNAIL_SIDE, 0.7, document.createElement('canvas')),
     }
-    throw new Error('Ảnh quá lớn, không thể nén đủ nhỏ để lưu.')
   } finally {
     decoded.release()
   }
