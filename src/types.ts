@@ -134,3 +134,24 @@ export interface Filters {
   noteState: 'all' | 'noted' | 'not-noted'
   warningState: 'all' | 'warning'
 }
+
+/** One photo of the second factory's near-date list, stored compressed inside Firestore (no Firebase Storage, no Blaze plan). */
+export interface Nm2Image {
+  id: string
+  chatDate: string
+  dataUrl: string
+  mimeType: string
+  width: number
+  height: number
+  fileName: string
+  createdAt?: Timestamp
+  createdBy: string
+}
+
+/** Lightweight per-day summary so the date list loads without downloading every photo. */
+export interface Nm2Day {
+  chatDate: string
+  imageCount: number
+  updatedAt?: Timestamp
+  updatedBy: string
+}
