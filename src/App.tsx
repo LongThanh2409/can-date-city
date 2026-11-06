@@ -1,6 +1,6 @@
 import { lazy, Suspense, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
-import { Activity, ArrowDownAZ, Bell, ChevronDown, Cloud, Copy, Eye, FilterX, History, LogOut, Package, PackageOpen, Plus, RefreshCw, Search, Settings2, Sparkles, Trash2, TriangleAlert, Users } from 'lucide-react'
-import { compareRecords, comparisonStats } from './domain/compare'
+import { Bell, ChevronDown, Cloud, Copy, Eye, FilterX, History, LogOut, Package, PackageOpen, Plus, RefreshCw, Search, Settings2, Trash2, TriangleAlert, Users } from 'lucide-react'
+import { compareRecords } from './domain/compare'
 import { closestPreviousDate, formatDate, previousCalendarDay, todayVietnam } from './lib/date'
 import { subscribeProducts, subscribeRecords, deleteChatDate, enforceRetention, updateRecordPriorities } from './services/firestore'
 import type { ComparedProduct, DateRecord, Filters, Product, ProductGroup } from './types'
@@ -16,7 +16,7 @@ import { recordNeedsAttention } from './domain/alerts'
 import { lotWarnings, type LotWarning } from './domain/lotWarnings'
 
 const noHistory: DateRecord[] = []
-const emptyFilters: Filters = { query:'', productGroup:'all', newState:'all', change:'all', productionFrom:'', productionTo:'', percentMin:'', percentMax:'', presence:'all', noteState:'all', warningState:'all' }
+const emptyFilters: Filters = { query:'', productGroup:'all', newState:'all', productionFrom:'', productionTo:'', percentMin:'', percentMax:'', presence:'all', noteState:'all', warningState:'all' }
 const ProductManager = lazy(()=>import('./components/ProductManager').then((module)=>({default:module.ProductManager})))
 const ReportExportDialog = lazy(()=>import('./components/ReportExportDialog').then((module)=>({default:module.ReportExportDialog})))
 const AdminPanel = lazy(()=>import('./components/AdminPanel').then((module)=>({default:module.AdminPanel})))
@@ -29,7 +29,6 @@ function App() {
   const [chatDate,setChatDate]=useState(todayVietnam()), [compareDate,setCompareDate]=useState(previousCalendarDay(todayVietnam()))
   const [manualCompare,setManualCompare]=useState(false), [filters,setFilters]=useState(emptyFilters)
   const [drawerProduct,setDrawerProduct]=useState<Product>(), [productsOpen,setProductsOpen]=useState(false), [showFilters,setShowFilters]=useState(false)
-  const [showStats,setShowStats]=useState(false)
   const [drawerStartsWithNewLot,setDrawerStartsWithNewLot]=useState(false)
   const [pickerOpen,setPickerOpen]=useState(false)
   const [sort,setSort]=useState<'priority'|'created'|'code'|'name'|'status'>('created'), [descending,setDescending]=useState(false), [page,setPage]=useState(1)
@@ -54,7 +53,7 @@ function App() {
   useEffect(()=>{if(role!=='sale'||!recentDates.length||recentDates.includes(chatDate))return;setChatDate(recentDates[0]);setManualCompare(false)},[role,recentDates,chatDate])
   useEffect(()=>{if(manualCompare)return; const yesterday=previousCalendarDay(chatDate); const chosen=availableDates.includes(yesterday)?yesterday:closestPreviousDate(chatDate,availableDates); setCompareDate(chosen??yesterday)},[chatDate,availableDates,manualCompare])
   const current=useMemo(()=>records.filter(r=>r.chatDate===chatDate),[records,chatDate]), previous=useMemo(()=>records.filter(r=>r.chatDate===compareDate),[records,compareDate])
-  const compared=useMemo(()=>compareRecords(current,previous),[current,previous]), stats=useMemo(()=>comparisonStats(compared),[compared])
+  const compared=useMemo(()=>compareRecords(current,previous),[current,previous])
   const productsById=useMemo(()=>new Map(products.map((product)=>[product.id,product])),[products])
   // Only admins enter data, and sale accounts must not see other dates through warning text.
   const historyByProduct=useMemo(()=>{const groups=new Map<string,DateRecord[]>();if(role==='admin')records.forEach((record)=>{if(record.chatDate!==chatDate)groups.set(record.productId,[...(groups.get(record.productId)??[]),record])});return groups},[records,chatDate,role])
@@ -73,7 +72,6 @@ function App() {
     if(deferredFilters.noteState==='not-noted'&&hasNote)return false
     if(deferredFilters.newState==='new'&&!activeRecord.isNewDate)return false; if(deferredFilters.newState==='not-new'&&activeRecord.isNewDate)return false
     if(deferredFilters.presence==='one-side'&&row.current&&row.previous)return false
-    if(deferredFilters.change!=='all'&&row.status!==deferredFilters.change&&!row.lots.some(l=>l.status===deferredFilters.change))return false
     return row.lots.some(l=>{const lot=l.current??l.previous!; return (!deferredFilters.productionFrom||lot.productionDate>=deferredFilters.productionFrom)&&(!deferredFilters.productionTo||lot.productionDate<=deferredFilters.productionTo)&&(!deferredFilters.percentMin||lot.datePercent>=Number(deferredFilters.percentMin))&&(!deferredFilters.percentMax||lot.datePercent<=Number(deferredFilters.percentMax))})
   }).sort((a,b)=>{
     const direction=descending?-1:1
@@ -132,24 +130,13 @@ function App() {
         {role!=='sale'&&!manualCompare&&previous.length>0&&compareDate!==previousCalendarDay(chatDate)&&<div className="border-t border-sky-200 bg-sky-50 px-4 py-2 text-sm text-sky-800">Ngày liền trước không có dữ liệu; đang dùng ngày gần nhất trước đó: <strong>{formatDate(compareDate)}</strong>.</div>}
       </section>
       {showAlerts&&role!=='user'&&<section className="mt-4 overflow-hidden rounded-xl border border-amber-200 bg-amber-50 shadow-sm"><div className="flex items-center justify-between border-b border-amber-200 px-4 py-3"><div><h2 className="font-bold text-amber-950">Cần chú ý hôm nay</h2><p className="text-xs text-amber-800">Mã có % date từ 30% trở xuống, ưu tiên khẩn hoặc quá hạn xử lý.</p></div><button className="icon-btn h-8 w-8" onClick={()=>setShowAlerts(false)} aria-label="Đóng cảnh báo">×</button></div><div className="flex gap-2 overflow-x-auto p-3">{alertRows.map((record)=><button key={record.id} className="min-w-52 rounded-lg border border-amber-200 bg-white p-3 text-left shadow-sm hover:border-amber-400" onClick={()=>{setFilters({...emptyFilters,query:record.productCode});setPage(1)}}><strong className="text-brand-700">{record.productCode}</strong><p className="mt-1 line-clamp-1 text-xs text-slate-600">{record.vietnameseName||record.productName}</p><p className="mt-2 text-xs font-bold text-amber-800">Thấp nhất {Math.min(...record.lots.map((lot)=>lot.datePercent))}% date</p></button>)}{!alertRows.length&&<p className="px-2 py-4 text-sm text-amber-800">Không có cảnh báo nào trong ngày đang chọn.</p>}</div></section>}
-      {role!=='sale'&&<section className="mt-4 overflow-hidden rounded-xl border bg-white shadow-sm">
-        <button type="button" className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left text-sm font-semibold text-slate-700 transition hover:bg-slate-50" aria-expanded={showStats} onClick={()=>setShowStats(!showStats)}>
-          <span className="flex items-center gap-2"><Activity className="text-brand-600" size={17}/>Thống kê nhanh</span>
-          <span className="flex items-center gap-2 text-xs text-slate-500">{showStats?'Đóng':'Mở'}<ChevronDown className={`transition-transform ${showStats?'rotate-180':''}`} size={16}/></span>
-        </button>
-        {showStats&&<div className="grid grid-cols-2 gap-3 border-t bg-slate-50/60 p-3 lg:grid-cols-5">{([
-          ['Mã hiện tại',stats.currentProducts,Package,'slate'],['Có thay đổi',stats.changedProducts,Activity,'amber'],['Lô mới tự động',stats.newLots,Sparkles,'blue'],['Người dùng đánh MỚI',stats.markedNew,Users,'indigo'],['Không còn ghi nhận',stats.missing,PackageOpen,'orange']
-        ] as const).map(([label,value,Icon,tone])=><div className="stat-card" key={label}><div className={`stat-icon stat-${tone}`}><Icon size={19}/></div><div><p className="text-xs font-medium text-slate-500">{label}</p><p className="text-2xl font-bold tabular-nums">{value}</p></div></div>)}</div>}
-      </section>}
       <section className="mt-4 overflow-hidden rounded-xl border bg-white shadow-sm">
         <div className="flex flex-wrap items-center gap-2 border-b p-3">
           <div className="search-wrap min-w-60 flex-1"><Search/><input aria-label="Tìm sản phẩm" placeholder="Tìm mã, tên, nhóm hàng hoặc quy cách…" value={filters.query} onChange={e=>{setFilters({...filters,query:e.target.value});setPage(1)}}/></div>
           {role==='sale'?<select className="input w-auto" aria-label="Lọc ghi chú Sale" value={filters.noteState} onChange={e=>{setFilters({...filters,noteState:e.target.value as Filters['noteState']});setPage(1)}}><option value="all">Tất cả ghi chú</option><option value="noted">Đã ghi chú</option><option value="not-noted">Chưa ghi chú</option></select>:<>
             <select className="input w-auto" aria-label="Lọc nhóm hàng" value={filters.productGroup} onChange={e=>{setFilters({...filters,productGroup:e.target.value as 'all'|ProductGroup});setPage(1)}}><option value="all">Tất cả nhóm hàng</option>{Object.entries(PRODUCT_GROUP_LABELS).map(([value,label])=><option value={value} key={value}>{label}</option>)}</select>
             <select className="input w-auto" value={filters.newState} onChange={e=>{setFilters({...filters,newState:e.target.value as Filters['newState']});setPage(1)}}><option value="all">Tất cả nhãn</option><option value="new">MỚI</option><option value="not-new">KHÔNG MỚI</option></select>
-            <select className="input w-auto" value={filters.change} onChange={e=>{setFilters({...filters,change:e.target.value as Filters['change']});setPage(1)}}><option value="all">Mọi biến động</option><option value="current-only">Hôm nay có, hôm qua không</option><option value="increased">Tăng số lượng</option><option value="decreased">Giảm số lượng</option><option value="new-lot">Lô mới</option><option value="missing-lot">Không ghi nhận lô</option><option value="unit-changed">Đổi đơn vị</option><option value="unchanged">Không đổi</option></select>
             <select className="input w-auto" title="Sắp xếp" value={sort==='created'?(descending?'created_desc':'created_asc'):sort} onChange={e=>{const val=e.target.value;if(val==='created_asc'){setSort('created');setDescending(false)}else if(val==='created_desc'){setSort('created');setDescending(true)}else{setSort(val as 'priority'|'code'|'name');setDescending(false)}}}><option value="created_asc">Sắp xếp: Mới thêm ở dưới</option><option value="created_desc">Sắp xếp: Mới thêm trước</option><option value="priority">Sắp xếp: Thứ tự kéo thả</option><option value="code">Sắp xếp: Mã</option><option value="name">Sắp xếp: Tên</option></select>
-            {sort!=='priority'&&<button className="icon-btn" onClick={()=>setDescending(!descending)} title="Đảo chiều sắp xếp" aria-label="Đảo chiều sắp xếp"><ArrowDownAZ className={descending?'rotate-180':''} size={17}/></button>}
             {role==='admin'&&<button type="button" aria-pressed={showPreviousOnly} className={showPreviousOnly?'btn-secondary border-amber-400 bg-amber-50 text-amber-800':'btn-secondary'} onClick={()=>{setShowPreviousOnly((value)=>!value);setPage(1)}}><PackageOpen size={16}/>{showPreviousOnly?'Ẩn mã hôm nay không có':`Kiểm tra mã hôm nay không có (${previousOnlyCount})`}</button>}
             <button className="btn-secondary" onClick={()=>setShowFilters(!showFilters)}><ChevronDown size={16}/>Bộ lọc</button>
             {role==='admin'&&<select className="input w-auto" aria-label="Lọc cảnh báo số liệu" value={filters.warningState} onChange={e=>{setFilters({...filters,warningState:e.target.value as Filters['warningState']});setPage(1)}}><option value="all">Tất cả số liệu</option><option value="warning">⚠ Cần kiểm tra ({warningsByProduct.size})</option></select>}

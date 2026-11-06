@@ -125,7 +125,6 @@ export interface Filters {
   query: string
   productGroup: 'all' | ProductGroup
   newState: 'all' | 'new' | 'not-new'
-  change: 'all' | ChangeStatus | 'current-only' | 'previous-only'
   productionFrom: string
   productionTo: string
   percentMin: string

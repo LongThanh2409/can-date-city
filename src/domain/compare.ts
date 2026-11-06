@@ -35,13 +35,3 @@ export function compareRecords(current: DateRecord[], previous: DateRecord[]): C
     return { key, productId: fallback.productId, productCode: fallback.productCode, productName: fallback.productName, vietnameseName: fallback.vietnameseName, current: now, previous: before, lots, status }
   })
 }
-
-export function comparisonStats(rows: ComparedProduct[]) {
-  return {
-    currentProducts: rows.filter((row) => row.current).length,
-    changedProducts: rows.filter((row) => row.status === 'changed' || row.status === 'current-only').length,
-    newLots: rows.flatMap((row) => row.lots).filter((lot) => lot.status === 'new-lot').length,
-    markedNew: rows.filter((row) => row.current?.isNewDate).length,
-    missing: rows.filter((row) => row.status === 'previous-only').length + rows.flatMap((row) => row.lots).filter((lot) => lot.status === 'missing-lot').length,
-  }
-}
