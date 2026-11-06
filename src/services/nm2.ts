@@ -6,6 +6,8 @@ import type { Nm2Day, Nm2Image } from '../types'
 
 const IMAGES = 'nm2Images'
 const DAYS = 'nm2Days'
+/** Factory 2 only needs the latest photos: keep the 2 most recent days that have photos. */
+export const NM2_RETENTION_DAYS = 2
 
 export function subscribeNm2Days(onData: (items: Nm2Day[]) => void, onError: (error: Error) => void): Unsubscribe {
   return onSnapshot(collection(db, DAYS), (snapshot) => {
@@ -63,9 +65,8 @@ export async function deleteNm2Date(chatDate: string): Promise<number> {
   return docs.length
 }
 
-/** Same policy as factory 1: keep the 5 most recent days that have photos. */
 export async function enforceNm2Retention(days: Nm2Day[]): Promise<string[]> {
-  const expired = datesToDelete(days.map((day) => day.chatDate))
+  const expired = datesToDelete(days.map((day) => day.chatDate), NM2_RETENTION_DAYS)
   for (const chatDate of expired) await deleteNm2Date(chatDate)
   return expired
 }

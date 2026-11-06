@@ -2,7 +2,7 @@ import { ChevronLeft, ChevronRight, Download, ImagePlus, Images, Loader2, Refres
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { formatDate, todayVietnam } from '../lib/date'
 import { compressImage, isImageFile } from '../lib/imageCompress'
-import { deleteNm2Date, deleteNm2Image, enforceNm2Retention, subscribeNm2Days, subscribeNm2Images, uploadNm2Image } from '../services/nm2'
+import { NM2_RETENTION_DAYS, deleteNm2Date, deleteNm2Image, enforceNm2Retention, subscribeNm2Days, subscribeNm2Images, uploadNm2Image } from '../services/nm2'
 import type { Nm2Day, Nm2Image, UserRole } from '../types'
 
 interface Props {
@@ -40,7 +40,7 @@ export function Nm2Panel({ role, userId, notify }: Props) {
   }, [chatDate, notify])
 
   useEffect(() => {
-    if (!isAdmin || days.length <= 5) return
+    if (!isAdmin || days.length <= NM2_RETENTION_DAYS) return
     const signature = days.map((day) => day.chatDate).join('|')
     if (retentionChecked.current === signature) return
     retentionChecked.current = signature
@@ -103,9 +103,9 @@ export function Nm2Panel({ role, userId, notify }: Props) {
       <div className="flex flex-wrap items-end gap-3 p-4">
         {isAdmin && <div><label className="label" htmlFor="nm2-date">Ngày chát</label><input id="nm2-date" className="input w-44 font-semibold" type="date" value={chatDate} onChange={(event) => setChatDate(event.target.value)}/></div>}
         <div className="min-w-0 flex-1">
-          <label className="label">5 ngày gần nhất có ảnh</label>
+          <label className="label">{NM2_RETENTION_DAYS} ngày gần nhất có ảnh</label>
           <div className="flex gap-1.5 overflow-x-auto pb-0.5">
-            {days.slice(0, 5).map((day) => <button key={day.chatDate} className={`date-chip ${day.chatDate === chatDate ? 'date-chip-active' : ''}`} onClick={() => setChatDate(day.chatDate)}>{formatDate(day.chatDate)} · {day.imageCount}</button>)}
+            {days.slice(0, NM2_RETENTION_DAYS).map((day) => <button key={day.chatDate} className={`date-chip ${day.chatDate === chatDate ? 'date-chip-active' : ''}`} onClick={() => setChatDate(day.chatDate)}>{formatDate(day.chatDate)} · {day.imageCount}</button>)}
             {daysLoading && <span className="flex items-center gap-1 py-2 text-sm text-slate-400"><RefreshCw className="animate-spin" size={14}/>Đang tải…</span>}
             {!daysLoading && !days.length && <span className="py-2 text-sm text-slate-400">Chưa có ngày nào</span>}
           </div>

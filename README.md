@@ -35,7 +35,7 @@ Các giả định nghiệp vụ:
 - Chỉ lưu **ảnh** cận date của nhà máy 2, không có bảng số liệu, ghi chú hay đối chiếu.
 - Chỉ **admin** tải ảnh lên (chọn tệp, kéo thả hoặc Ctrl+V); mọi tài khoản được cấp quyền đều xem, phóng to và tải ảnh về.
 - Không dùng Firebase Storage (không cần gói Blaze): ảnh được nén JPEG trên trình duyệt (cạnh dài tối đa 2048px, dưới ~900KB) và lưu thẳng trong collection `nm2Images`; `nm2Days/{ngày}` giữ số ảnh mỗi ngày.
-- Giữ 5 ngày có ảnh gần nhất giống NM1; ngày cũ hơn tự dọn khi admin mở tab NM2.
+- Chỉ giữ **2 ngày có ảnh gần nhất** (NM1 vẫn giữ 5 ngày); ngày cũ hơn tự dọn khi admin mở tab NM2.
 - Cần deploy lại Firestore Rules: `firebase deploy --only firestore:rules`.
 
 ## Chạy trên Windows
