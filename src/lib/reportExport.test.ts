@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { mkdir, writeFile } from 'node:fs/promises'
-import { createNearDatePdfBlob, createNearDateWordBlob, estimateOptimizedPageCount, prepareNearDateReport, reportAutoEmphasis, reportEmphasisKey, resolveReportOrientation } from './reportExport'
+import { createNearDatePdfBlob, createNearDateWordBlob, estimateOptimizedPageCount, prepareNearDateReport, reportAutoEmphasis, reportEmphasisKey, reportNoteRuns, resolveReportOrientation } from './reportExport'
 import type { NearDateReportProduct } from './reportExport'
 import type { ComparedProduct, DateRecord, Product } from '../types'
 
@@ -60,6 +60,31 @@ describe('prepareNearDateReport', () => {
     ])
     expect(JSON.stringify(result)).not.toContain('L01')
   })
+
+  it('chỉ đưa ghi chú lưu ý vào báo cáo khi admin xuất', () => {
+    const withAdminNote = { ...row, current: { ...current, adminNote: '  Kiểm tra lại kệ B  ' } }
+    expect(prepareNearDateReport([withAdminNote], [product])[0].adminNote).toBe('')
+    expect(prepareNearDateReport([withAdminNote], [product], true)[0].adminNote).toBe('Kiểm tra lại kệ B')
+  })
+
+  it('in ghi chú lưu ý in đậm ngay dưới ghi chú Sale', () => {
+    const base: NearDateReportProduct = { productCode:'A', productName:'', vietnameseName:'', packaging:'', productGroup:'', isNewDate:false, saleNote:'', lots:[] }
+    expect(reportNoteRuns([], { ...base, saleNote:'Ưu tiên', adminNote:'Kiểm tra kệ B' })).toEqual([
+      { text:'Ưu tiên', bold:false },
+      { text:'\nGhi chú lưu ý: Kiểm tra kệ B', bold:true },
+    ])
+    expect(reportNoteRuns([], { ...base, adminNote:'Kiểm tra kệ B' })).toEqual([{ text:'Ghi chú lưu ý: Kiểm tra kệ B', bold:true }])
+    expect(reportNoteRuns([], { ...base, saleNote:'Ưu tiên' })).toEqual([{ text:'Ưu tiên', bold:false }])
+  })
+
+  it('tạo được Word và PDF có ghi chú lưu ý ở mọi bố cục', async () => {
+    const report = prepareNearDateReport([{ ...row, current: { ...current, adminNote: 'Dòng 1\nDòng 2' } }], [product], true)
+    const files = await Promise.all((['optimized','compact','detailed'] as const).flatMap((layout) => [
+      createNearDateWordBlob(report, '2026-10-22', 'portrait', 'monochrome', layout),
+      createNearDatePdfBlob(report, '2026-10-22', 'portrait', 'color', layout),
+    ]))
+    files.forEach((file) => expect(file.size).toBeGreaterThan(5_000))
+  }, 20_000)
 
   it('không xuất mã chỉ có ở ngày so sánh', () => {
     expect(prepareNearDateReport([{ ...row, current: undefined }], [product])).toEqual([])

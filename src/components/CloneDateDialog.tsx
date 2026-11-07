@@ -16,6 +16,7 @@ export function CloneDateDialog({ availableDates, defaultSourceDate, defaultTarg
   const [sourceDate, setSourceDate] = useState(availableDates.includes(defaultSourceDate) ? defaultSourceDate : availableDates[0] ?? '')
   const [targetDate, setTargetDate] = useState(defaultTargetDate)
   const [copySaleNotes, setCopySaleNotes] = useState(false)
+  const [copyAdminNotes, setCopyAdminNotes] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
 
@@ -32,7 +33,7 @@ export function CloneDateDialog({ availableDates, defaultSourceDate, defaultTarg
     setBusy(true)
     setError('')
     try {
-      const result = await cloneChatDate(sourceDate, targetDate, userId, copySaleNotes)
+      const result = await cloneChatDate(sourceDate, targetDate, userId, copySaleNotes, copyAdminNotes)
       const skipped = result.skipped ? ` Bỏ qua ${result.skipped} mã đã có ở ngày đích.` : ''
       onCompleted(targetDate, `Đã sao chép ${result.copied} mã từ ${formatDate(sourceDate)}.${skipped}`)
     } catch {
@@ -52,6 +53,7 @@ export function CloneDateDialog({ availableDates, defaultSourceDate, defaultTarg
         <div><label className="label" htmlFor="clone-source-date">Ngày nguồn</label><select id="clone-source-date" className="input" value={sourceDate} onChange={(event)=>setSourceDate(event.target.value)} autoFocus>{availableDates.map((date)=><option value={date} key={date}>{formatDate(date)}</option>)}</select></div>
         <div><label className="label" htmlFor="clone-target-date">Ngày đích</label><input id="clone-target-date" className="input" type="date" value={targetDate} onChange={(event)=>setTargetDate(event.target.value)}/></div>
         <label className="flex cursor-pointer items-start gap-3 rounded-xl border bg-slate-50 p-3 text-sm"><input className="mt-0.5 h-4 w-4" type="checkbox" checked={copySaleNotes} onChange={(event)=>setCopySaleNotes(event.target.checked)}/><span><strong className="block">Sao chép ghi chú Sale</strong><span className="text-xs text-slate-500">Mặc định ghi chú và trạng thái xử lý Sale được làm mới cho ngày đích.</span></span></label>
+        <label className="flex cursor-pointer items-start gap-3 rounded-xl border bg-slate-50 p-3 text-sm"><input className="mt-0.5 h-4 w-4" type="checkbox" checked={copyAdminNotes} onChange={(event)=>setCopyAdminNotes(event.target.checked)}/><span><strong className="block">Sao chép ghi chú lưu ý (Admin)</strong><span className="text-xs text-slate-500">Mặc định ghi chú lưu ý của Admin được làm mới cho ngày đích.</span></span></label>
         {error&&<p className="notice notice-error" role="alert">{error}</p>}
       </div>
       <footer className="flex justify-end gap-2 border-t bg-slate-50 px-5 py-4"><button type="button" className="btn-secondary" onClick={onClose} disabled={busy}>Hủy</button><button type="submit" className="btn-primary" disabled={busy||!availableDates.length}>{busy?<Loader2 className="animate-spin" size={16}/>:<Copy size={16}/>} {busy?'Đang sao chép…':'Sao chép dữ liệu'}</button></footer>

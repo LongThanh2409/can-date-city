@@ -77,6 +77,14 @@ export async function updateSaleNote(recordId: string, saleNote: string, userId:
   })
 }
 
+export async function updateAdminNote(recordId: string, adminNote: string, userId: string): Promise<void> {
+  await updateDoc(doc(db, 'dateRecords', recordId), {
+    adminNote,
+    updatedBy: userId,
+    updatedAt: serverTimestamp(),
+  })
+}
+
 export async function updateRecordPriorities(records: Array<{ id: string; priorityOrder: number }>, userId: string): Promise<void> {
   await commitChunks(records, (batch, record) => batch.set(doc(db, 'dateRecords', record.id), {
     priorityOrder: record.priorityOrder,
@@ -122,7 +130,7 @@ export interface CloneDateResult {
   skipped: number
 }
 
-export async function cloneChatDate(sourceDate: string, targetDate: string, userId: string, copySaleNotes = false): Promise<CloneDateResult> {
+export async function cloneChatDate(sourceDate: string, targetDate: string, userId: string, copySaleNotes = false, copyAdminNotes = false): Promise<CloneDateResult> {
   const [source, target] = await Promise.all([
     getDocs(query(collection(db, 'dateRecords'), where('chatDate', '==', sourceDate))),
     getDocs(query(collection(db, 'dateRecords'), where('chatDate', '==', targetDate))),
@@ -142,6 +150,7 @@ export async function cloneChatDate(sourceDate: string, targetDate: string, user
       chatDate: targetDate,
       isNewDate: false,
       saleNote: copySaleNotes ? record.saleNote ?? '' : '',
+      adminNote: copyAdminNotes ? record.adminNote ?? '' : '',
       saleWorkflow: { status: 'pending', priority: 'normal' },
       createdBy: userId,
       updatedBy: userId,

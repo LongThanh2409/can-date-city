@@ -80,6 +80,8 @@ export interface DateRecord {
   isNewDate: boolean
   priorityOrder?: number
   saleNote?: string
+  /** Admin-only reminder per product and day; printed in bold under the Sale note as "Ghi chú lưu ý". */
+  adminNote?: string
   saleWorkflow?: SaleWorkflow
   lots: Lot[]
   createdAt?: Timestamp

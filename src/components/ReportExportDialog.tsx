@@ -9,11 +9,13 @@ type ReportExportDialogProps = {
   rows: ComparedProduct[]
   products: Product[]
   date: string
+  /** Only admins see the admin note, so only their exports print it. */
+  includeAdminNote?: boolean
   onClose: () => void
   notify: (message: string, error?: boolean) => void
 }
 
-export function ReportExportDialog({ rows, products, date, onClose, notify }: ReportExportDialogProps) {
+export function ReportExportDialog({ rows, products, date, includeAdminNote = false, onClose, notify }: ReportExportDialogProps) {
   const [orientation, setOrientation] = useState<ReportOrientation>('auto')
   const [printMode, setPrintMode] = useState<ReportPrintMode>('monochrome')
   const [layoutMode, setLayoutMode] = useState<ReportLayoutMode>('optimized')
@@ -25,7 +27,7 @@ export function ReportExportDialog({ rows, products, date, onClose, notify }: Re
   const [previewError, setPreviewError] = useState(false)
   const [exporting, setExporting] = useState<'docx' | 'pdf'>()
   const previewUrlRef=useRef<string | undefined>(undefined)
-  const report = useMemo(() => prepareNearDateReport(rows, products), [rows, products])
+  const report = useMemo(() => prepareNearDateReport(rows, products, includeAdminNote), [rows, products, includeAdminNote])
   const emphasis = useMemo(() => reportAutoEmphasis(report), [report])
   const lotCount = useMemo(() => report.reduce((sum, item) => sum + item.lots.length, 0), [report])
   const actualOrientation = useMemo(() => resolveReportOrientation(report, orientation, layoutMode), [report, orientation, layoutMode])
@@ -84,7 +86,7 @@ export function ReportExportDialog({ rows, products, date, onClose, notify }: Re
   const runExport = async (type: 'docx' | 'pdf') => {
     setExporting(type)
     try {
-      await exportNearDateReport(rows, date, type, products, orientation, printMode, layoutMode,tuning,emphasis,pageTarget)
+      await exportNearDateReport(rows, date, type, products, orientation, printMode, layoutMode,tuning,emphasis,pageTarget,includeAdminNote)
       notify(`Đã tạo file ${type === 'docx' ? 'Word' : 'PDF'} ${layoutLabel}, khổ ${actualOrientation === 'portrait' ? 'dọc' : 'ngang'}${layoutMode === 'optimized' && estimatedPageCount ? `, ${estimatedPageCount} trang` : orientation === 'auto' ? ' tự động' : ''}${printMode === 'monochrome' ? ', tối ưu in trắng đen' : ', bản màu'}.`)
     } catch (error) {
       console.error(error)

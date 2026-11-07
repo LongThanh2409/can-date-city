@@ -17,6 +17,8 @@ export type NearDateReportProduct = {
   packaging: string
   productGroup: string
   saleNote: string
+  /** Admin reminder; only filled when an admin exports. */
+  adminNote?: string
   isNewDate: boolean
   lots: NearDateReportLot[]
 }
@@ -42,6 +44,19 @@ function emphasized(emphasis: ReportEmphasis, item: NearDateReportProduct, field
 // A marked note is bolded clause by clause, so long notes do not turn the whole page bold.
 function saleNoteRuns(emphasis: ReportEmphasis, item: NearDateReportProduct): SaleNoteRun[] {
   return emphasized(emphasis,item,'saleNote') ? analyzeSaleNote(item.saleNote).runs : [{ text:item.saleNote, bold:false }]
+}
+
+export const ADMIN_NOTE_LABEL = 'Ghi chú lưu ý:'
+
+function hasNote(item: NearDateReportProduct) {
+  return Boolean(item.saleNote || item.adminNote)
+}
+
+// The admin note sits right under the Sale note in the same cell, labelled and fully bold.
+export function reportNoteRuns(emphasis: ReportEmphasis, item: NearDateReportProduct): SaleNoteRun[] {
+  const sale = item.saleNote ? saleNoteRuns(emphasis,item) : []
+  if (!item.adminNote) return sale.length ? sale : [{ text:'', bold:false }]
+  return [...sale, { text:`${sale.length ? '\n' : ''}${ADMIN_NOTE_LABEL} ${item.adminNote}`, bold:true }]
 }
 
 export function reportAutoEmphasis(report: NearDateReportProduct[]): ReportEmphasis {
@@ -212,7 +227,7 @@ function optimizedPdfCells(printMode: ReportPrintMode, tuning: ReportTuning, aut
     productionDate: (item: NearDateReportProduct, lot: NearDateReportLot, id?: string) => pdfCell(lot.productionDate?formatDate(lot.productionDate):'—',{id,bold:emphasized(emphasis,item,'productionDate',lot),alignment:'center',fontSize:font(7.5),lineHeight,margin:lotMargin}),
     quantity: (lot: NearDateReportLot) => pdfCell(pdfQuantity(lot.quantityPacks,font(7.7)),{alignment:'center',lineHeight,margin:lotMargin}),
     datePercent: (item: NearDateReportProduct, lot: NearDateReportLot) => pdfCell(lot.productionDate?`${lot.datePercent}%`:'—',{bold:emphasized(emphasis,item,'datePercent',lot),color:monochrome?'#000000':`#${BRAND}`,alignment:'center',fontSize:font(8.5),lineHeight,margin:lotMargin}),
-    note: (item: NearDateReportProduct, rowSpan: number) => pdfCell(saleNoteRuns(emphasis,item) as Content,{rowSpan,color:monochrome?'#000000':item.saleNote?'#422006':`#${MUTED}`,alignment:item.saleNote?'left':'center',fillColor:item.saleNote&&!monochrome?`#${NOTE_FILL}`:'#FFFFFF',fontSize:font(7.6),lineHeight,margin:textMargin}),
+    note: (item: NearDateReportProduct, rowSpan: number) => pdfCell(reportNoteRuns(emphasis,item) as Content,{rowSpan,color:monochrome?'#000000':hasNote(item)?'#422006':`#${MUTED}`,alignment:hasNote(item)?'left':'center',fillColor:hasNote(item)&&!monochrome?`#${NOTE_FILL}`:'#FFFFFF',fontSize:font(7.6),lineHeight,margin:textMargin}),
     group: (label: string, rowSpan: number, border?: [boolean,boolean,boolean,boolean]) => pdfCell(label,{rowSpan,border,bold:true,alignment:'center',fontSize:font(6.5),lineHeight,margin:lotMargin}),
     blank: () => pdfCell('', { fontSize: font(6.5), lineHeight, margin: lotMargin }),
   }
@@ -324,7 +339,7 @@ export async function estimateOptimizedPageCount(report: NearDateReportProduct[]
   return (await cachedOptimizedLayout(sortedReportByGroup(report),date,printMode,tuning,emphasis,pageTarget)).pages.length
 }
 
-export function prepareNearDateReport(rows: ComparedProduct[], products: Product[]): NearDateReportProduct[] {
+export function prepareNearDateReport(rows: ComparedProduct[], products: Product[], includeAdminNote = false): NearDateReportProduct[] {
   const prepared = rows.flatMap((row) => {
     if (!row.current) return []
     const product = products.find((item) => item.id === row.productId)
@@ -347,6 +362,7 @@ export function prepareNearDateReport(rows: ComparedProduct[], products: Product
       packaging: product ? packagingSummary(product) : 'Chưa bổ sung quy cách',
       productGroup: product ? PRODUCT_GROUP_LABELS[product.productGroup] : 'Chưa phân nhóm',
       saleNote: row.current.saleNote?.trim() ?? '',
+      adminNote: includeAdminNote ? row.current.adminNote?.trim() ?? '' : '',
       isNewDate: row.current.isNewDate,
       lots,
     }]
@@ -507,11 +523,11 @@ export async function createNearDateWordBlob(report: NearDateReportProduct[], da
           cell([optimizedParagraph(lot.productionDate ? `${lot.datePercent}%` : '—', { bold: emphasized(emphasis,item,'datePercent',lot), color: monochrome ? '000000' : BRAND, size: 17, align: AlignmentType.CENTER, keepNext })], optimizedWidths[4], { borders: rowBorder, margins: optimizedMargins }),
         )
         if (first) rowCells.push(cell([
-          optimizedParagraph(saleNoteRuns(emphasis,item), { color: monochrome ? '000000' : '422006', size: item.saleNote ? 15 : 10, keepNext }),
+          optimizedParagraph(reportNoteRuns(emphasis,item), { color: monochrome ? '000000' : '422006', size: hasNote(item) ? 15 : 10, keepNext }),
         ], optimizedWidths[5], {
           rowSpan: lots.length,
-          verticalAlign: item.saleNote ? VerticalAlign.TOP : VerticalAlign.CENTER,
-          fill: item.saleNote && !monochrome ? NOTE_FILL : 'FFFFFF',
+          verticalAlign: hasNote(item) ? VerticalAlign.TOP : VerticalAlign.CENTER,
+          fill: hasNote(item) && !monochrome ? NOTE_FILL : 'FFFFFF',
           borders: rowBorder,
           margins: optimizedMargins,
         }))
@@ -572,11 +588,11 @@ export async function createNearDateWordBlob(report: NearDateReportProduct[], da
           cell([compactParagraph(lot.productionDate ? `${lot.datePercent}%` : '—', { bold: emphasized(emphasis,item,'datePercent',lot), color: monochrome ? '000000' : BRAND, size: 22, align: AlignmentType.CENTER })], compactWidths[4], { borders: rowBorder, margins: compactMargins }),
         )
         if (first) {
-          rowCells.push(cell(item.saleNote ? [
-            compactParagraph(saleNoteRuns(emphasis,item), { color: monochrome ? '000000' : '422006', size: 18 }),
+          rowCells.push(cell(hasNote(item) ? [
+            compactParagraph(reportNoteRuns(emphasis,item), { color: monochrome ? '000000' : '422006', size: 18 }),
           ] : [compactParagraph('—', { color: MUTED, size: 17, align: AlignmentType.CENTER })], compactWidths[5], {
-            verticalAlign: item.saleNote ? VerticalAlign.TOP : VerticalAlign.CENTER,
-            fill: item.saleNote && !monochrome ? NOTE_FILL : 'FFFFFF',
+            verticalAlign: hasNote(item) ? VerticalAlign.TOP : VerticalAlign.CENTER,
+            fill: hasNote(item) && !monochrome ? NOTE_FILL : 'FFFFFF',
             borders: rowBorder,
             margins: compactMargins,
           }))
@@ -617,7 +633,7 @@ export async function createNearDateWordBlob(report: NearDateReportProduct[], da
         tableHeader: true,
         children: [cell([
           textParagraph(monochrome ? 'GHI CHÚ SALE - ƯU TIÊN THỰC HIỆN' : 'GHI CHÚ SALE', { bold: true, color: monochrome ? '000000' : NOTE_INK, size: monochrome ? 20 : 18, keepNext: true }),
-          textParagraph(item.saleNote ? saleNoteRuns(emphasis,item) : 'Chưa có ghi chú Sale.', { color: monochrome ? '000000' : item.saleNote ? '422006' : MUTED, size: item.saleNote ? (monochrome ? 23 : 22) : 19, keepNext: true }),
+          textParagraph(hasNote(item) ? reportNoteRuns(emphasis,item) : 'Chưa có ghi chú Sale.', { color: monochrome ? '000000' : hasNote(item) ? '422006' : MUTED, size: hasNote(item) ? (monochrome ? 23 : 22) : 19, keepNext: true }),
         ], tableWidth, { fill: monochrome ? 'FFFFFF' : NOTE_FILL, span: 3, verticalAlign: VerticalAlign.TOP, borders: monochrome ? { top: emphasisBorder, bottom: emphasisBorder, left: emphasisBorder, right: emphasisBorder, insideHorizontal: emphasisBorder, insideVertical: emphasisBorder } : undefined })],
       }),
       new TableRow({
@@ -766,7 +782,8 @@ export async function createNearDatePdfBlob(report: NearDateReportProduct[], dat
         const productLineCount = 2
           + Math.ceil((item.vietnameseName || item.productName || '').length / productCharsPerLine)
           + Math.ceil((4 + item.packaging.length) / productCharsPerLine)
-        const noteLineCount = item.saleNote ? 1 + Math.ceil(item.saleNote.length / noteCharsPerLine) : 1
+        const noteLineCount = (item.saleNote ? 1 + Math.ceil(item.saleNote.length / noteCharsPerLine) : 1)
+          + (item.adminNote ? Math.ceil((ADMIN_NOTE_LABEL.length + 1 + item.adminNote.length) / noteCharsPerLine) + item.adminNote.split('\n').length - 1 : 0)
         const requiredGroupHeight = Math.max(productLineCount * 10 + 8, noteLineCount * 11 + 8, segment.length * 19)
         const rowHeight = Math.ceil(requiredGroupHeight / segment.length)
         const body: TableCell[][] = segment.map((lot, lotIndex) => {
@@ -785,9 +802,9 @@ export async function createNearDatePdfBlob(report: NearDateReportProduct[], dat
             pdfCell(pdfQuantity(lot.quantityPacks,9.5), { alignment: 'center', margin: [4, 4, 4, 4] }),
             pdfCell(lot.productionDate ? `${lot.datePercent}%` : '—', { bold: emphasized(emphasis,item,'datePercent',lot), color: monochrome ? '#000000' : `#${BRAND}`, alignment: 'center', fontSize: 11, margin: [4, 4, 4, 4] }),
           )
-          if (first) row.push(pdfCell(item.saleNote ? [
-            { text: saleNoteRuns(emphasis,item), color: monochrome ? '#000000' : '#422006', fontSize: 9 },
-          ] : '—', { rowSpan: segment.length, alignment: item.saleNote ? 'left' : 'center', fillColor: item.saleNote && !monochrome ? `#${NOTE_FILL}` : '#FFFFFF', margin: [5, 4, 5, 4] }))
+          if (first) row.push(pdfCell(hasNote(item) ? [
+            { text: reportNoteRuns(emphasis,item), color: monochrome ? '#000000' : '#422006', fontSize: 9 },
+          ] : '—', { rowSpan: segment.length, alignment: hasNote(item) ? 'left' : 'center', fillColor: hasNote(item) && !monochrome ? `#${NOTE_FILL}` : '#FFFFFF', margin: [5, 4, 5, 4] }))
           else row.push({})
           if (first) row.push(pdfCell(item.productGroup, { rowSpan: segment.length, bold: true, alignment: 'center', fontSize: 7, margin: [2, 4, 2, 4] }))
           else row.push({})
@@ -812,7 +829,7 @@ export async function createNearDatePdfBlob(report: NearDateReportProduct[], dat
       [
         pdfCell([
           { text: monochrome ? 'GHI CHÚ SALE - ƯU TIÊN THỰC HIỆN\n' : 'GHI CHÚ SALE\n', bold: true, color: monochrome ? '#000000' : `#${NOTE_INK}`, fontSize: monochrome ? 10 : 9 },
-          { text: item.saleNote ? saleNoteRuns(emphasis,item) : 'Chưa có ghi chú Sale.', color: monochrome ? '#000000' : item.saleNote ? '#422006' : `#${MUTED}`, fontSize: item.saleNote ? (monochrome ? 12 : 11) : 9 },
+          { text: hasNote(item) ? reportNoteRuns(emphasis,item) : 'Chưa có ghi chú Sale.', color: monochrome ? '#000000' : hasNote(item) ? '#422006' : `#${MUTED}`, fontSize: hasNote(item) ? (monochrome ? 12 : 11) : 9 },
         ], { colSpan: 3, fillColor: monochrome ? '#FFFFFF' : `#${NOTE_FILL}` }),
         {},
         {},
@@ -865,8 +882,8 @@ export async function createNearDatePdfBlob(report: NearDateReportProduct[], dat
   return pdfMake.createPdf(definition).getBlob()
 }
 
-export async function exportNearDateReport(rows: ComparedProduct[], date: string, type: 'docx' | 'pdf', products: Product[], orientation: ReportOrientation = 'auto', printMode: ReportPrintMode = 'monochrome', layoutMode: ReportLayoutMode = 'optimized', tuning: ReportTuning = DEFAULT_REPORT_TUNING, emphasis: ReportEmphasis = [], pageTarget: ReportPageTarget = 2) {
-  const report = prepareNearDateReport(rows, products)
+export async function exportNearDateReport(rows: ComparedProduct[], date: string, type: 'docx' | 'pdf', products: Product[], orientation: ReportOrientation = 'auto', printMode: ReportPrintMode = 'monochrome', layoutMode: ReportLayoutMode = 'optimized', tuning: ReportTuning = DEFAULT_REPORT_TUNING, emphasis: ReportEmphasis = [], pageTarget: ReportPageTarget = 2, includeAdminNote = false) {
+  const report = prepareNearDateReport(rows, products, includeAdminNote)
   const blob = type === 'docx' ? await createNearDateWordBlob(report, date, orientation, printMode, layoutMode,tuning,emphasis,pageTarget) : await createNearDatePdfBlob(report, date, orientation, printMode, layoutMode,tuning,emphasis,pageTarget)
   triggerDownload(blob, `can-date-${fileDate(date)}.${type}`)
 }

@@ -4,15 +4,32 @@ import { lotWarnings, type LotWarning } from '../domain/lotWarnings'
 import { validateLots } from '../domain/validation'
 import { lotQuantityInPacks, packagingSummary, quantityBreakdownFromLot } from '../domain/product'
 import { formatDate } from '../lib/date'
-import { deleteDateRecord, saveDateRecord, updateSaleNote } from '../services/firestore'
+import { deleteDateRecord, saveDateRecord, updateAdminNote, updateSaleNote } from '../services/firestore'
 import type { ComparedProduct, DateRecord, Lot, Product, UserRole } from '../types'
 
 type InlineEdit = { rowKey: string; lot: Lot; isNewDate: boolean }
 type NoteSaveState = 'dirty' | 'saving' | 'saved' | 'error'
 type NoteStatus = { state: NoteSaveState; savedAt?: Date }
+type NoteField = 'saleNote' | 'adminNote'
 
-const noteDraftStorageKey = (recordId: string) => `chat-can-date:sale-note-draft:${recordId}`
-const noteKey = (row: ComparedProduct) => row.current?.id ?? row.key
+const NOTE_FIELDS: NoteField[] = ['saleNote', 'adminNote']
+const noteLabels: Record<NoteField, string> = { saleNote: 'ghi chú Sale', adminNote: 'ghi chú lưu ý' }
+// Sale keys keep their original format, so drafts saved before the admin note existed are still restored.
+const noteDraftStorageKey = (recordId: string, field: NoteField = 'saleNote') => `chat-can-date:${field === 'adminNote' ? 'admin' : 'sale'}-note-draft:${recordId}`
+const noteKey = (row: ComparedProduct, field: NoteField = 'saleNote') => `${field === 'adminNote' ? 'admin:' : ''}${row.current?.id ?? row.key}`
+const savedNote = (row: ComparedProduct, field: NoteField) => row.current?.[field] ?? ''
+
+function noteStatusText(status?: NoteStatus) {
+  if (status?.state === 'saving') return 'Đang tự động lưu…'
+  if (status?.state === 'dirty') return 'Chưa lưu · Tự lưu sau 2 giây'
+  if (status?.state === 'error') return 'Lưu lỗi · Bản nháp vẫn an toàn'
+  if (status?.state === 'saved') return `Đã lưu${status.savedAt ? ` lúc ${status.savedAt.toLocaleTimeString('vi-VN',{hour:'2-digit',minute:'2-digit'})}` : ''}`
+  return 'Tự động lưu khi ngừng nhập'
+}
+
+function NoteSaveBar({ status, buttonClassName, onSave }: { status?: NoteStatus; buttonClassName: string; onSave: () => void }) {
+  return <div className="mt-2 flex items-center justify-between gap-2"><p className={`text-xs font-medium ${status?.state==='error'?'text-rose-700':status?.state==='saved'?'text-emerald-700':'text-slate-500'}`}>{noteStatusText(status)}</p><button className={`btn-secondary h-8 shrink-0 ${buttonClassName}`} disabled={!status||status.state==='saving'||status.state==='saved'} onMouseDown={(event)=>event.preventDefault()} onClick={onSave}><Save size={14}/>{status?.state==='error'?'Thử lại':status?.state==='saved'?'Đã lưu':'Lưu ngay'}</button></div>
+}
 
 function recordInput(source: DateRecord, userId: string, changes: Partial<Pick<DateRecord, 'lots' | 'isNewDate' | 'saleNote'>> = {}): Omit<DateRecord, 'createdAt' | 'updatedAt'> {
   return {
@@ -28,6 +45,7 @@ function recordInput(source: DateRecord, userId: string, changes: Partial<Pick<D
     isNewDate: changes.isNewDate ?? source.isNewDate,
     priorityOrder: source.priorityOrder,
     saleNote: changes.saleNote ?? source.saleNote ?? '',
+    adminNote: source.adminNote ?? '',
     saleWorkflow: source.saleWorkflow,
   }
 }
@@ -49,34 +67,38 @@ export const ComparisonTable = memo(function ComparisonTable({ rows, products, w
   const noteDraftsRef = useRef<Record<string,string>>({})
   const noteTimersRef = useRef<Record<string,ReturnType<typeof setTimeout>>>({})
   const savingNotesRef = useRef(new Set<string>())
-  const pendingNotesRef = useRef<Record<string,{ row: ComparedProduct; note: string; manual: boolean }>>({})
-  const saveSaleNoteRef = useRef<((row: ComparedProduct, saleNote?: string, manual?: boolean) => Promise<void>) | undefined>(undefined)
+  const pendingNotesRef = useRef<Record<string,{ row: ComparedProduct; field: NoteField; note: string; manual: boolean }>>({})
+  const saveNoteRef = useRef<((row: ComparedProduct, field: NoteField, note?: string, manual?: boolean) => Promise<void>) | undefined>(undefined)
   const canManageData = role === 'admin'
   const canEditSaleNote = role === 'admin' || role === 'sale'
+  const canEditNote = (field: NoteField) => field === 'adminNote' ? role === 'admin' : canEditSaleNote
   const productsById = useMemo(()=>new Map(products.map((product)=>[product.id,product])),[products])
 
   useEffect(() => {
-    if (!canEditSaleNote) return
+    const fields = NOTE_FIELDS.filter((field) => field === 'adminNote' ? role === 'admin' : role === 'admin' || role === 'sale')
+    if (!fields.length) return
     const restored: Record<string,string> = {}
-    rows.forEach((row) => {
-      if (!row.current || noteDraftsRef.current[noteKey(row)] !== undefined) return
+    const restoredTargets: Record<string,{ row: ComparedProduct; field: NoteField }> = {}
+    rows.forEach((row) => fields.forEach((field) => {
+      const key = noteKey(row,field)
+      if (!row.current || noteDraftsRef.current[key] !== undefined) return
       try {
-        const draft = localStorage.getItem(noteDraftStorageKey(row.current.id))
-        if (draft !== null && draft !== (row.current.saleNote ?? '')) restored[noteKey(row)] = draft
-        else if (draft !== null) localStorage.removeItem(noteDraftStorageKey(row.current.id))
+        const storageKey = noteDraftStorageKey(row.current.id,field)
+        const draft = localStorage.getItem(storageKey)
+        if (draft !== null && draft !== savedNote(row,field)) { restored[key] = draft; restoredTargets[key] = { row, field } }
+        else if (draft !== null) localStorage.removeItem(storageKey)
       } catch { /* Trình duyệt có thể chặn localStorage; tự động lưu Firestore vẫn hoạt động. */ }
-    })
+    }))
     if (!Object.keys(restored).length) return
     Object.assign(noteDraftsRef.current, restored)
     setNoteDrafts((current)=>({...current,...restored}))
     setNoteStatuses((current)=>{
       const next={...current}; Object.keys(restored).forEach((key)=>{next[key]={state:'dirty'}}); return next
     })
-    Object.entries(restored).forEach(([key,note])=>{
-      const row = rows.find((item)=>noteKey(item)===key)
-      if (row) noteTimersRef.current[key] = setTimeout(()=>void saveSaleNoteRef.current?.(row,note),2000)
+    Object.entries(restoredTargets).forEach(([key,{ row, field }])=>{
+      noteTimersRef.current[key] = setTimeout(()=>void saveNoteRef.current?.(row,field,restored[key]),2000)
     })
-  }, [canEditSaleNote, rows])
+  }, [role, rows])
 
   useEffect(() => {
     const hasUnsavedNote = Object.values(noteStatuses).some((status)=>status.state==='dirty'||status.state==='saving'||status.state==='error')
@@ -87,7 +109,10 @@ export const ComparisonTable = memo(function ComparisonTable({ rows, products, w
   }, [noteStatuses])
 
   useEffect(() => {
-    const confirmedKeys = rows.flatMap((row)=>row.current && noteStatuses[noteKey(row)]?.state==='saved' && noteDraftsRef.current[noteKey(row)] === (row.current.saleNote ?? '') ? [noteKey(row)] : [])
+    const confirmedKeys = rows.flatMap((row)=>row.current ? NOTE_FIELDS.flatMap((field)=>{
+      const key = noteKey(row,field)
+      return noteStatuses[key]?.state==='saved' && noteDraftsRef.current[key] === savedNote(row,field) ? [key] : []
+    }) : [])
     if (!confirmedKeys.length) return
     confirmedKeys.forEach((key)=>{delete noteDraftsRef.current[key]})
     setNoteDrafts((current)=>{
@@ -119,63 +144,64 @@ export const ComparisonTable = memo(function ComparisonTable({ rows, products, w
     await persist(row, row.current.lots.map((lot)=>lot.lotId===editing.lot.lotId?editing.lot:lot), editing.isNewDate)
   }
 
-  async function saveSaleNote(row: ComparedProduct, saleNote = noteDraftsRef.current[noteKey(row)] ?? row.current?.saleNote ?? '', manual = false) {
-    if (!row.current || !canEditSaleNote) return
-    const key = noteKey(row)
+  async function saveNote(row: ComparedProduct, field: NoteField, note = noteDraftsRef.current[noteKey(row,field)] ?? savedNote(row,field), manual = false) {
+    if (!row.current || !canEditNote(field)) return
+    const key = noteKey(row,field)
     clearTimeout(noteTimersRef.current[key])
     delete noteTimersRef.current[key]
     if (savingNotesRef.current.has(key)) {
-      pendingNotesRef.current[key] = { row, note:saleNote, manual }
+      pendingNotesRef.current[key] = { row, field, note, manual }
       return
     }
     savingNotesRef.current.add(key)
     setNoteStatuses((current)=>({...current,[key]:{state:'saving'}}))
     try {
-      await updateSaleNote(row.current.id,saleNote,userId)
+      await (field === 'adminNote' ? updateAdminNote : updateSaleNote)(row.current.id,note,userId)
       const latestDraft = noteDraftsRef.current[key]
-      if (latestDraft === saleNote) {
+      if (latestDraft === note) {
         clearTimeout(noteTimersRef.current[key])
         delete noteTimersRef.current[key]
-        try { localStorage.removeItem(noteDraftStorageKey(row.current.id)) } catch { /* Không ảnh hưởng dữ liệu đã lưu. */ }
+        try { localStorage.removeItem(noteDraftStorageKey(row.current.id,field)) } catch { /* Không ảnh hưởng dữ liệu đã lưu. */ }
       }
-      setNoteStatuses((current)=>({...current,[key]:latestDraft===saleNote?{state:'saved',savedAt:new Date()}:{state:'dirty'}}))
-      if (manual) notify('Đã lưu ghi chú Sale cho mã sản phẩm.')
+      setNoteStatuses((current)=>({...current,[key]:latestDraft===note?{state:'saved',savedAt:new Date()}:{state:'dirty'}}))
+      if (manual) notify(`Đã lưu ${noteLabels[field]} cho mã sản phẩm.`)
     } catch {
       setNoteStatuses((current)=>({...current,[key]:{state:'error'}}))
-      if (manual) notify('Không thể lưu ghi chú Sale. Bản nháp vẫn được giữ trên thiết bị.', true)
+      if (manual) notify(`Không thể lưu ${noteLabels[field]}. Bản nháp vẫn được giữ trên thiết bị.`, true)
     } finally {
       savingNotesRef.current.delete(key)
       const pending = pendingNotesRef.current[key]
       delete pendingNotesRef.current[key]
-      if (pending && pending.note !== saleNote) void saveSaleNote(pending.row,pending.note,pending.manual)
+      if (pending && pending.note !== note) void saveNote(pending.row,pending.field,pending.note,pending.manual)
     }
   }
-  useEffect(() => { saveSaleNoteRef.current = saveSaleNote })
+  useEffect(() => { saveNoteRef.current = saveNote })
 
-  function changeSaleNote(row: ComparedProduct, saleNote: string) {
+  function changeNote(row: ComparedProduct, field: NoteField, note: string) {
     if (!row.current) return
-    const key = noteKey(row)
-    if (!savingNotesRef.current.has(key) && saleNote === (row.current.saleNote ?? '')) {
+    const key = noteKey(row,field)
+    const storageKey = noteDraftStorageKey(row.current.id,field)
+    if (!savingNotesRef.current.has(key) && note === savedNote(row,field)) {
       clearTimeout(noteTimersRef.current[key])
       delete noteTimersRef.current[key]
       delete noteDraftsRef.current[key]
       setNoteDrafts((current)=>{const next={...current};delete next[key];return next})
       setNoteStatuses((current)=>({...current,[key]:{state:'saved'}}))
-      try { localStorage.removeItem(noteDraftStorageKey(row.current!.id)) } catch { /* Không còn bản nháp cần giữ. */ }
+      try { localStorage.removeItem(storageKey) } catch { /* Không còn bản nháp cần giữ. */ }
       return
     }
-    noteDraftsRef.current[key] = saleNote
-    setNoteDrafts((current)=>({...current,[key]:saleNote}))
+    noteDraftsRef.current[key] = note
+    setNoteDrafts((current)=>({...current,[key]:note}))
     setNoteStatuses((current)=>({...current,[key]:{state:'dirty'}}))
-    try { localStorage.setItem(noteDraftStorageKey(row.current.id),saleNote) } catch { /* Firestore vẫn là nơi lưu chính. */ }
+    try { localStorage.setItem(storageKey,note) } catch { /* Firestore vẫn là nơi lưu chính. */ }
     clearTimeout(noteTimersRef.current[key])
-    noteTimersRef.current[key] = setTimeout(()=>void saveSaleNote(row,saleNote),2000)
+    noteTimersRef.current[key] = setTimeout(()=>void saveNote(row,field,note),2000)
   }
 
-  function saveNoteOnBlur(row: ComparedProduct) {
-    const key = noteKey(row)
+  function saveNoteOnBlur(row: ComparedProduct, field: NoteField) {
+    const key = noteKey(row,field)
     const draft = noteDraftsRef.current[key]
-    if (draft !== undefined && noteStatuses[key]?.state !== 'saved') void saveSaleNote(row,draft)
+    if (draft !== undefined && noteStatuses[key]?.state !== 'saved') void saveNote(row,field,draft)
   }
 
   async function removeCode(row: ComparedProduct) {
@@ -206,8 +232,8 @@ export const ComparisonTable = memo(function ComparisonTable({ rows, products, w
     return <article key={row.key} className="rounded-xl border bg-white p-4 shadow-sm">
       <div className="flex items-start justify-between gap-3"><div><strong className="text-base text-brand-700">{row.productCode}</strong><p className="font-semibold text-slate-900">{row.vietnameseName||row.productName||'Chưa bổ sung tên'}</p>{product&&<p className="mt-1 text-xs text-slate-500">{packagingSummary(product)}</p>}</div><span className={row.current.isNewDate?'badge badge-blue':'badge'}>{row.current.isNewDate?'CÓ MỚI':'KHÔNG MỚI'}</span></div>
       <div className="mt-3 space-y-2">{row.current.lots.map((lot,index)=><div key={lot.lotId} className="grid grid-cols-3 gap-2 rounded-lg bg-slate-50 p-3 text-xs"><span><span className="block text-slate-400">Lô {index+1} · NSX</span><strong>{formatDate(lot.productionDate)}</strong></span><span><span className="block text-slate-400">Số lượng</span><strong><PackQuantity value={product?lotQuantityInPacks(lot,product):lot.quantity}/></strong></span><span><span className="block text-slate-400">% date</span><strong className={lot.datePercent<=30?'text-rose-700':''}>{lot.datePercent}%</strong></span></div>)}</div>
-      <textarea className="mt-3 min-h-24 w-full resize-y rounded-lg border bg-white p-3 text-sm font-semibold shadow-sm focus:border-violet-500" value={saleNote} onChange={(event)=>changeSaleNote(row,event.target.value)} onBlur={()=>saveNoteOnBlur(row)} placeholder="Ghi chú tình trạng hoặc hướng xử lý…"/>
-      <div className="mt-2 flex items-center justify-between gap-2"><p className={`text-xs ${noteStatus?.state==='error'?'font-bold text-rose-700':noteStatus?.state==='saved'?'font-bold text-emerald-700':'text-slate-500'}`}>{noteStatus?.state==='saving'?'Đang lưu…':noteStatus?.state==='dirty'?'Tự lưu sau 2 giây':noteStatus?.state==='error'?'Lưu lỗi · bản nháp vẫn an toàn':noteStatus?.state==='saved'?'Đã lưu':'Tự động lưu khi ngừng nhập'}</p><button className="btn-secondary h-9" disabled={!noteStatus||noteStatus.state==='saving'||noteStatus.state==='saved'} onMouseDown={(event)=>event.preventDefault()} onClick={()=>void saveSaleNote(row,saleNote,true)}><Save size={14}/>{noteStatus?.state==='error'?'Thử lại':'Lưu ngay'}</button></div>
+      <textarea className="mt-3 min-h-24 w-full resize-y rounded-lg border bg-white p-3 text-sm font-semibold shadow-sm focus:border-violet-500" value={saleNote} onChange={(event)=>changeNote(row,'saleNote',event.target.value)} onBlur={()=>saveNoteOnBlur(row,'saleNote')} placeholder="Ghi chú tình trạng hoặc hướng xử lý…"/>
+      <div className="mt-2 flex items-center justify-between gap-2"><p className={`text-xs ${noteStatus?.state==='error'?'font-bold text-rose-700':noteStatus?.state==='saved'?'font-bold text-emerald-700':'text-slate-500'}`}>{noteStatus?.state==='saving'?'Đang lưu…':noteStatus?.state==='dirty'?'Tự lưu sau 2 giây':noteStatus?.state==='error'?'Lưu lỗi · bản nháp vẫn an toàn':noteStatus?.state==='saved'?'Đã lưu':'Tự động lưu khi ngừng nhập'}</p><button className="btn-secondary h-9" disabled={!noteStatus||noteStatus.state==='saving'||noteStatus.state==='saved'} onMouseDown={(event)=>event.preventDefault()} onClick={()=>void saveNote(row,'saleNote',saleNote,true)}><Save size={14}/>{noteStatus?.state==='error'?'Thử lại':'Lưu ngay'}</button></div>
     </article>
   })}</div>
 
@@ -216,6 +242,8 @@ export const ComparisonTable = memo(function ComparisonTable({ rows, products, w
     const product=productsById.get(row.productId)
     const saleNote=noteDrafts[noteKey(row)]??row.current?.saleNote??row.previous?.saleNote??''
     const noteStatus=noteStatuses[noteKey(row)]
+    const adminNote=noteDrafts[noteKey(row,'adminNote')]??row.current?.adminNote??''
+    const adminNoteStatus=noteStatuses[noteKey(row,'adminNote')]
     const noteOpen=role!=='admin'||Boolean(openAdminNotes[row.key])
     const isEditingProduct=editing?.rowKey===row.key
     const rowWarnings=!canManageData?[]:isEditingProduct&&editing&&row.current&&checkedEditLot?lotWarnings({chatDate:row.current.chatDate,lots:row.current.lots.map((item)=>item.lotId===checkedEditLot.lotId?checkedEditLot:item),isNewDate:editing.isNewDate,history:historyByProduct.get(row.productId)??[],product}):warningsByProduct.get(row.productId)??[]
@@ -228,7 +256,7 @@ export const ComparisonTable = memo(function ComparisonTable({ rows, products, w
         <td className="number-cell whitespace-nowrap">{isEditing?<input className="input w-28" type="number" min="0" step="any" value={editing!.lot.quantity} onBlur={()=>setCheckedEditLot(editing!.lot)} onChange={(event)=>{const quantity=Number(event.target.value);setEditing({...editing!,lot:{...editing!.lot,quantity,unit:'gói',quantityBreakdown:{packs:quantity}}})}}/>:<><PackQuantity value={product?lotQuantityInPacks(lot,product):lot.unit==='gói'?lot.quantity:null}/>{!comparedLot.current&&<span className="ml-1 text-[10px] font-normal text-slate-400">(ngày trước)</span>}</>}</td>
         <td className="number-cell whitespace-nowrap">{isEditing?<input className="input w-20" type="number" min="0" max="100" step="any" value={editing!.lot.datePercent} onBlur={()=>setCheckedEditLot(editing!.lot)} onChange={(event)=>setEditing({...editing!,lot:{...editing!.lot,datePercent:Number(event.target.value)}})}/>:<>{lot.datePercent}%{!comparedLot.current&&<span className="ml-1 text-[10px] font-normal text-slate-400">(ngày trước)</span>}</>}</td>
         {canManageData&&<td>{comparedLot.current?<><div className="flex min-w-40 items-center gap-1.5">{isEditing?<><button className="icon-btn text-emerald-700" disabled={busy} onClick={()=>void saveInline(row)} title="Lưu thay đổi" aria-label="Lưu thay đổi"><Check size={16}/></button><button className="icon-btn" disabled={busy} onClick={()=>setEditing(undefined)} title="Hủy sửa" aria-label="Hủy sửa"><X size={16}/></button></>:<>{index===0&&<button className="icon-btn text-brand-700" onClick={()=>onAddLot(row)} title="Thêm lô mới cho mã này" aria-label="Thêm lô mới"><Plus size={16}/></button>}<button className="icon-btn" onClick={()=>{const quantity=product?(lotQuantityInPacks(lot,product)??lot.quantity):lot.quantity;const editedLot={...lot,quantity,unit:'gói',quantityBreakdown:{packs:quantity}};setEditing({rowKey:row.key,lot:editedLot,isNewDate:row.current?.isNewDate??false});setCheckedEditLot(editedLot)}} title="Sửa trực tiếp" aria-label="Sửa lô"><Pencil size={16}/></button><button className="icon-btn text-rose-600" onClick={()=>void removeLot(row,lot)} title="Xóa lô" aria-label="Xóa lô"><Trash2 size={16}/></button>{index===0&&<button className="icon-btn text-rose-700" onClick={()=>void removeCode(row)} title="Xóa toàn bộ mã khỏi ngày đang chọn" aria-label="Xóa toàn bộ mã"><PackageX size={16}/></button>}</>}</div></>:<span className="text-xs text-slate-400">Chỉ có ở ngày trước</span>}</td>}
-        {index===0&&<td rowSpan={lots.length} className="w-[26rem] max-w-[26rem] align-top"><div className="w-96 max-w-96 overflow-hidden">{role==='admin'&&row.current&&<button className="btn-secondary h-8 border-violet-200 text-violet-700" type="button" aria-expanded={noteOpen} onClick={()=>setOpenAdminNotes((current)=>({...current,[row.key]:!noteOpen}))}><ChevronDown className={`transition-transform ${noteOpen?'rotate-180':''}`} size={14}/>{noteOpen?'Đóng ghi chú':'Mở ghi chú Sale'}</button>}{canEditSaleNote&&row.current&&noteOpen?<><textarea className={`${role==='admin'?'mt-2 ':''}min-h-20 w-full resize-y break-words rounded-lg border bg-white p-2 text-sm font-semibold text-slate-900 shadow-sm focus:border-violet-500`} value={saleNote} onChange={(event)=>changeSaleNote(row,event.target.value)} onBlur={()=>saveNoteOnBlur(row)} placeholder="Ghi chú Sale cho cả mã…"/><div className="mt-2 flex items-center justify-between gap-2"><p className={`text-xs font-medium ${noteStatus?.state==='error'?'text-rose-700':noteStatus?.state==='saved'?'text-emerald-700':'text-slate-500'}`}>{noteStatus?.state==='saving'?'Đang tự động lưu…':noteStatus?.state==='dirty'?'Chưa lưu · Tự lưu sau 2 giây':noteStatus?.state==='error'?'Lưu lỗi · Bản nháp vẫn an toàn':noteStatus?.state==='saved'?`Đã lưu${noteStatus.savedAt?` lúc ${noteStatus.savedAt.toLocaleTimeString('vi-VN',{hour:'2-digit',minute:'2-digit'})}`:''}`:'Tự động lưu khi ngừng nhập'}</p><button className="btn-secondary h-8 shrink-0 border-violet-200 text-violet-700" disabled={!noteStatus||noteStatus.state==='saving'||noteStatus.state==='saved'} onMouseDown={(event)=>event.preventDefault()} onClick={()=>void saveSaleNote(row,saleNote,true)}><Save size={14}/>{noteStatus?.state==='error'?'Thử lại':noteStatus?.state==='saved'?'Đã lưu':'Lưu ngay'}</button></div></>:<p className={`${role==='admin'&&row.current?'mt-2 line-clamp-2 ':''}whitespace-pre-wrap break-words text-sm ${saleNote.trim()?'font-semibold text-slate-800':'text-slate-400'}`}>{saleNote.trim()||'Chưa có ghi chú.'}</p>}</div></td>}
+        {index===0&&<td rowSpan={lots.length} className="w-[26rem] max-w-[26rem] align-top"><div className="w-96 max-w-96 overflow-hidden">{role==='admin'&&row.current&&<button className="btn-secondary h-8 border-violet-200 text-violet-700" type="button" aria-expanded={noteOpen} onClick={()=>setOpenAdminNotes((current)=>({...current,[row.key]:!noteOpen}))}><ChevronDown className={`transition-transform ${noteOpen?'rotate-180':''}`} size={14}/>{noteOpen?'Đóng ghi chú':'Mở ghi chú'}</button>}{canEditSaleNote&&row.current&&noteOpen?<><textarea className={`${role==='admin'?'mt-2 ':''}min-h-20 w-full resize-y break-words rounded-lg border bg-white p-2 text-sm font-semibold text-slate-900 shadow-sm focus:border-violet-500`} value={saleNote} onChange={(event)=>changeNote(row,'saleNote',event.target.value)} onBlur={()=>saveNoteOnBlur(row,'saleNote')} placeholder="Ghi chú Sale cho cả mã…"/><NoteSaveBar status={noteStatus} buttonClassName="border-violet-200 text-violet-700" onSave={()=>void saveNote(row,'saleNote',saleNote,true)}/>{role==='admin'&&<div className="mt-3 border-t border-dashed border-rose-200 pt-3"><label className="mb-1 block text-[11px] font-bold uppercase tracking-wide text-rose-700">Ghi chú lưu ý · chỉ Admin · in đậm dưới ghi chú Sale</label><textarea className="min-h-16 w-full resize-y break-words rounded-lg border border-rose-200 bg-rose-50/40 p-2 text-sm font-bold text-rose-950 shadow-sm focus:border-rose-500" value={adminNote} onChange={(event)=>changeNote(row,'adminNote',event.target.value)} onBlur={()=>saveNoteOnBlur(row,'adminNote')} placeholder="Ghi chú lưu ý cho cả mã…"/><NoteSaveBar status={adminNoteStatus} buttonClassName="border-rose-200 text-rose-700" onSave={()=>void saveNote(row,'adminNote',adminNote,true)}/></div>}</>:<p className={`${role==='admin'&&row.current?'mt-2 line-clamp-2 ':''}whitespace-pre-wrap break-words text-sm ${saleNote.trim()?'font-semibold text-slate-800':'text-slate-400'}`}>{saleNote.trim()||'Chưa có ghi chú.'}</p>}{role==='admin'&&row.current&&!noteOpen&&adminNote.trim()&&<p className="mt-1 line-clamp-2 whitespace-pre-wrap break-words text-sm font-bold text-rose-800">Ghi chú lưu ý: {adminNote.trim()}</p>}</div></td>}
       </tr>
     })
   })}</tbody></table></div></>

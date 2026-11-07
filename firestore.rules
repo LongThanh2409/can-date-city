@@ -39,6 +39,7 @@ service cloud.firestore {
         && request.resource.data.createdBy is string
         && request.resource.data.updatedBy is string
         && (!('saleNote' in request.resource.data) || request.resource.data.saleNote is string)
+        && (!('adminNote' in request.resource.data) || request.resource.data.adminNote is string)
         && (!('saleWorkflow' in request.resource.data) || (
           request.resource.data.saleWorkflow is map
           && request.resource.data.saleWorkflow.status in ['pending', 'in_progress', 'done']
